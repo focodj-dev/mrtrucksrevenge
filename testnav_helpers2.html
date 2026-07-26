@@ -260,7 +260,8976 @@
 
   </div>
 
-  <script type="module" src="game.js"></script>
+    <script type="module">
+
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+    import {
+
+      EffectComposer
+
+    } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js";
+
+    import {
+
+      RenderPass
+
+    } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/RenderPass.js";
+
+    import {
+
+      UnrealBloomPass
+
+    } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js";
+
+    import {
+
+      ShaderPass
+
+    } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/ShaderPass.js";
+
+    import {
+
+      FXAAShader
+
+    } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/shaders/FXAAShader.js";
+
+    const FilmGrainShader = {
+
+        uniforms: {
+
+          tDiffuse: {
+
+            value: null
+
+          },
+
+          time: {
+
+            value: 0
+
+          },
+
+          grainAmount: {
+
+            value: .04
+
+          },
+
+          vignetteAmount: {
+
+            value: .35
+
+          },
+
+          colorGrade: {
+
+            value: new THREE.Color(.95, 1, 1.05)
+
+          }
+
+        },
+
+        vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+
+        fragmentShader: "\n    uniform sampler2D tDiffuse; uniform float time, grainAmount, vignetteAmount; uniform vec3 colorGrade; varying vec2 vUv;\n    float rand(vec2 co) { return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453); }\n    void main() {\n      vec4 color = texture2D(tDiffuse, vUv);\n      float grain = rand(vUv + time * 0.5) * grainAmount;\n      color.rgb += vec3(grain - grainAmount * 0.5);\n      float dist = distance(vUv, vec2(0.5));\n      float vignette = smoothstep(0.7, 0.2, dist) * vignetteAmount;\n      color.rgb = mix(color.rgb, vec3(0.02, 0.03, 0.06), vignette);\n      color.rgb *= colorGrade; color.rgb = pow(color.rgb, vec3(0.95));\n      gl_FragColor = color;\n    }"
+
+      },
+
+      MotionBlurShader = {
+
+        uniforms: {
+
+          tDiffuse: {
+
+            value: null
+
+          },
+
+          tPrev: {
+
+            value: null
+
+          },
+
+          blend: {
+
+            value: .15
+
+          }
+
+        },
+
+        vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+
+        fragmentShader: "\n    uniform sampler2D tDiffuse, tPrev; uniform float blend; varying vec2 vUv;\n    void main() { gl_FragColor = mix(texture2D(tPrev, vUv), texture2D(tDiffuse, vUv), blend); }"
+
+      },
+
+      CONFIG = {
+
+        segmentLength: 100,
+
+        roadWidth: 30,
+
+        laneCount: 4,
+
+        viewDistance: 15,
+
+        trafficCount: 20,
+
+        truckSpawnDist: 400,
+
+        cityChance: .35,
+
+        turnChance: .45,
+
+        cinematic: {
+
+          bloomStrength: 1.2,
+
+          bloomRadius: .5,
+
+          bloomThreshold: .1,
+
+          fogNear: 40,
+
+          fogFar: 700,
+
+          speedLinesThreshold: 80
+
+        }
+
+      };
+
+// 🚀 AGGRESSIVE NON-BLOCKING PRELOADER
+
+let preloadActive = false;
+
+const PRELOAD_TARGET = 150; // Preload ~150 segments ahead (~15,000 units)
+
+const PRELOAD_BATCH = 3;    // Process 3 segments per frame to keep menu at 60fps
+
+
+
+function initPreloader() {
+
+    if (!highwayManager || preloadActive || gameActive) return;
+
+    preloadActive = true;
+
+    runPreloadBatch();
+
+}
+
+
+
+function runPreloadBatch() {
+
+    // Stop immediately if game starts or manager is destroyed
+
+    if (!preloadActive || gameActive || !highwayManager) return;
+
+
+
+    let count = 0;
+
+    while (highwayManager.segments.length < PRELOAD_TARGET && count < PRELOAD_BATCH) {
+
+// Inside runPreloadBatch() while loop:
+
+highwayManager.addSegment();
+
+if (CONFIG.viewDistance < PRELOAD_TARGET) CONFIG.viewDistance = Math.max(CONFIG.viewDistance, PRELOAD_TARGET); // Keep engine happy
+
+count++;
+
+        highwayManager.addSegment();
+
+        count++;
+
+    }
+
+
+
+    if (highwayManager.segments.length < PRELOAD_TARGET) {
+
+        // Yield to main thread to keep UI responsive
+
+        requestAnimationFrame(runPreloadBatch);
+
+    } else {
+
+        preloadActive = false;
+
+        console.log(`✅ Highway Preloaded: ${highwayManager.segments.length} segments ready.`);
+
+    }
+
+}
+
+
+
+function cancelPreloader() {
+
+    preloadActive = false;
+
+}
+
+// 🔄 15-SEC CPU-THROTTLED PRELOADER (Optimized for ~1GHz CPUs)
+
+const PreloadManager = {
+
+  target: CONFIG.viewDistance + 12, // ~27 segments: fills screen + safe buffer
+
+  current: 0,
+
+  start: 0,
+
+  maxTime: 14500, // 14.5s hard cap
+
+  active: false,
+
+
+
+  init() {
+
+    const screen = document.getElementById('preload-screen');
+
+    const bar = document.getElementById('preload-bar');
+
+    const status = document.getElementById('preload-status');
+
+    const skip = document.getElementById('preload-skip');
+
+    if (!screen) return;
+
+
+
+    this.active = true;
+
+    this.start = performance.now();
+
+    screen.style.display = 'flex';
+
+    screen.style.opacity = '1';
+
+
+
+    skip.onclick = () => this.finish(true);
+
+
+
+    const tick = () => {
+
+      if (!this.active) return;
+
+      if (performance.now() - this.start > this.maxTime) return this.finish();
+
+
+
+      const frameStart = performance.now();
+
+      // Strict 2ms CPU budget per yield. Keeps menu/intro at 60fps on weak chips.
+
+      while (this.current < this.target && performance.now() - frameStart < 2) {
+
+        if (!highwayManager) highwayManager = new HighwayManager();
+
+        highwayManager.addSegment();
+
+        this.current++;
+
+      }
+
+
+
+      const pct = Math.min(100, (this.current / this.target) * 100);
+
+      bar.style.width = `${pct}%`;
+
+      status.textContent = `Allocated segments: ${this.current}/${this.target} | ${Math.floor((performance.now() - this.start) / 1000)}s elapsed`;
+
+
+
+      if (this.current >= this.target) return this.finish();
+
+      setTimeout(tick, 0); // Yield to main thread
+
+    };
+
+
+
+    tick();
+
+  },
+
+
+
+  finish(skipped = false) {
+
+    this.active = false;
+
+    if (gameActive) return;
+
+    const screen = document.getElementById('preload-screen');
+
+    if (!screen) return;
+
+    screen.style.opacity = '0';
+
+    setTimeout(() => {
+
+      screen.style.display = 'none';
+
+      // Proceed to menu/wizard flow
+
+      if (document.getElementById('anti-lan-wizard')?.style.display !== 'none') {
+
+        AntiLanWizard.show();
+
+      } else {
+
+        showMenuScreen();
+
+      }
+
+    }, 500);
+
+  }
+
+};
+
+    let scene, camera, renderer, composer, player, truck, highwayManager, traffic = [],
+
+      gameActive = !1,
+
+      score = 0,
+
+      lives = 3,
+
+      speed = 0,
+
+      highScore = 0,
+
+      keys = {},
+
+      clock = new THREE.Clock,
+
+      prevRenderTarget = null,
+
+      speedLines = [],
+
+      damageFlash = 0,
+
+      cameraMode = 0;
+
+    const CAMERA_MODES = ["Top-Car", "Motorcycle", "Helicopter"];
+
+    let motorcycleGroup = null,
+
+      cameraHintTimeout = null,
+
+      lastAchievementScore = 0,
+
+      cameraTarget = {
+
+        x: 0,
+
+        y: 15,
+
+        z: 40
+
+      };
+
+    const UPGRADES = {
+
+      v8: {
+
+        unlocked: !1,
+
+        claimed: !1,
+
+        requirement: 1e4,
+
+        effect: {
+
+          accelMult: 1.4,
+
+          maxSpeedBonus: 20
+
+        }
+
+      },
+
+      tires: {
+
+        unlocked: !1,
+
+        claimed: !1,
+
+        requirement: 25e3,
+
+        effect: {
+
+          handlingMult: 1.5,
+
+          driftReduction: .3
+
+        }
+
+      },
+
+      nitro: {
+
+        unlocked: !1,
+
+        claimed: !1,
+
+        requirement: 5e4,
+
+        effect: {
+
+          nitroMult: 2,
+
+          rechargeMult: 1.5
+
+        }
+
+      }
+
+    };
+
+// 🛡️ ANTI-LANSCHOOL MODULE STATE
+
+let antiLanActive = false;
+
+let antiLanTimer = null;
+
+const FLASH_DURATION = 1000;
+
+const CALIBRATION_INTERVALS = [2500, 5000];  // <--- PASTE THIS LINE HERE
+
+function loadUpgrades() {
+
+  try {
+
+    const e = localStorage.getItem("mtr_upgrades_v2");
+
+    if (e) {
+
+      const t = JSON.parse(e);
+
+      Object.keys(UPGRADES).forEach(key => {
+
+        t[key] && (UPGRADES[key].unlocked = !!t[key].unlocked, UPGRADES[key].claimed = !!t[key].claimed);
+
+      });
+
+    }
+
+    const t = localStorage.getItem("mtr_highscore_v2");
+
+    if (t) highScore = parseInt(t, 10) || 0;
+
+    console.log("✅ Upgrades loaded:", UPGRADES);
+
+  } catch (e) {
+
+    console.warn("⚠️ Could not load upgrades:", e);
+
+    Object.keys(UPGRADES).forEach(key => {
+
+      UPGRADES[key].unlocked = false;
+
+      UPGRADES[key].claimed = false;
+
+    });
+
+    highScore = 0;
+
+  }
+
+}
+
+// 🛡️ GLOBAL STEALTH STATE
+
+// (Defined earlier) Default: ON (can be disabled via wizard/settings)
+
+
+
+
+
+// 🛡️ GLOBAL STEALTH STATE (Defined at top for global access)
+
+let stealthEnabled = true; 
+
+
+
+// 🎭 STEALTH PROFILE MANAGER
+
+const StealthManager = {
+
+    profiles: [
+
+        { title: "LanSchool (A Knips Favorite)", favicon: "https://lanschoolair.lenovosoftware.com/favicon.ico" },
+
+        { title: "Google Classroom", favicon: "https://ssl.gstatic.com/classroom/favicon.png" },
+
+        { title: "Google Docs", favicon: "https://ssl.gstatic.com/docs/documents/images/kix-favicon7.ico" },
+
+        { title: "Canvas", favicon: "https://du11hjcvx0uqb.cloudfront.net/dist/images/favicon-e10d657a73.ico" },
+
+        { title: "Khan Academy", favicon: "https://www.khanacademy.org/favicon.ico" },
+
+        { title: "Desmos", favicon: "https://www.desmos.com/favicon.ico" },
+
+        { title: "IXL Learning", favicon: "https://www.ixl.com/favicon.ico" },
+
+        { title: "Kahoot!", favicon: "https://kahoot.com/favicon.ico" },
+
+        { title: "Blooket", favicon: "https://www.blooket.com/favicon.ico" },
+
+        { title: "Gimkit", favicon: "https://www.gimkit.com/favicon.png" },
+
+        { title: "Quizlet", favicon: "https://quizlet.com/favicon.ico" },
+
+        { title: "Nearpod", favicon: "https://nearpod.com/favicon.ico" },
+
+        { title: "Padlet", favicon: "https://padlet.com/favicon.ico" },
+
+        { title: "Tinkercad", favicon: "https://www.tinkercad.com/favicon.ico" },
+
+        { title: "Canva for Education", favicon: "https://www.canva.com/favicon.ico" },
+
+        { title: "CommonLit", favicon: "https://www.commonlit.org/favicon.ico" },
+
+        { title: "Grammarly", favicon: "https://static-web.grammarly.com/cms/master/public/favicon.ico" },
+
+        { title: "Synergy (StudentVUE)", favicon: "https://www.edupoint.com/favicon.ico" },
+
+        { title: "404 Error | Page Not Found", favicon: "https://www.google.com/s2/favicons?domain=example.com&sz=32" },
+
+        { title: "The Printer Jammed", favicon: "https://www.hp.com/favicon.ico" }
+
+    ],
+
+    currentIndex: 0,
+
+    init() {
+
+        this.originalTitle = document.title;
+
+    },
+
+    apply(index) {
+
+        // ✅ Check stealth state directly
+
+        if (!stealthEnabled) return;
+
+        
+
+        const p = this.profiles[index % this.profiles.length];
+
+        document.title = p.title;
+
+        
+
+        let link = document.querySelector("link[rel*='icon']");
+
+        if (!link) {
+
+            link = document.createElement('link');
+
+            link.rel = 'shortcut icon';
+
+            link.type = 'image/x-icon';
+
+            document.head.appendChild(link);
+
+        }
+
+        link.href = p.favicon;
+
+        this.currentIndex = index;
+
+    },
+
+    randomize() { this.apply(Math.floor(Math.random() * this.profiles.length)); },
+
+    cycle() { this.apply(this.currentIndex + 1); },
+
+    restore() { 
+
+        document.title = this.originalTitle || "Mr. Truck's Revenge"; 
+
+    }
+
+};
+
+
+
+// 🎓 EDUCATIONAL OVERLAY (BOSS KEY)
+
+const BossKey = {
+
+    active: false,
+
+    overlay: null,
+
+    quizletProfileIndex: null,
+
+    
+
+    init() {
+
+        if (this.overlay) return;
+
+        // Find Quizlet index
+
+        this.quizletProfileIndex = StealthManager.profiles.findIndex(p => 
+
+            p.title.toLowerCase().includes('quizlet')
+
+        );
+
+        if (this.quizletProfileIndex === -1) this.quizletProfileIndex = 0;
+
+        
+
+        this.overlay = document.createElement('div');
+
+        this.overlay.id = 'edu-overlay';
+
+        this.overlay.style.cssText = `
+
+            position:fixed;inset:0;background:linear-gradient(135deg, #f8f9ff 0%, #eef1f8 100%);
+
+            z-index:9996;display:flex;flex-direction:column;font-family:-apple-system,sans-serif;
+
+            opacity:0;pointer-events:none;transition:opacity 0.2s ease;color:#1a1a2e;
+
+        `;
+
+        
+
+        const flashcards = this._generateQuizletContent();
+
+        this.overlay.innerHTML = `
+
+            <header style="background:#fff;border-bottom:1px solid #e0e4f0;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;">
+
+                <div style="display:flex;align-items:center;gap:12px;">
+
+                    <svg width="32" height="32" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3" fill="#4257b2"/><path d="M7 9h10M7 13h7M7 17h4" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+
+                    <div><h1 style="font-size:16px;font-weight:700;color:#4257b2;margin:0;">Quizlet</h1><p style="font-size:11px;color:#6b7280;margin:0;">Study Mode • Flashcards</p></div>
+
+                </div>
+
+                <div style="text-align:right;"><p style="font-size:13px;font-weight:600;margin:0 0 2px;">${flashcards.setTitle}</p></div>
+
+            </header>
+
+            <main style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:20px;">
+
+                <div style="width:100%;max-width:520px;background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,0.06);padding:32px;text-align:center;">
+
+                    <p style="font-size:13px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;margin:0 0 12px;">Term</p>
+
+                    <p style="font-size:24px;font-weight:700;color:#1a1a2e;margin:0 0 24px;">${flashcards.currentTerm}</p>
+
+                    <div style="display:flex;gap:12px;justify-content:center;">
+
+                        <button style="padding:12px 24px;border:2px solid #e0e4f0;border-radius:10px;background:#fff;color:#4b5563;font-weight:600;cursor:default;">👎 Need Practice</button>
+
+                        <button style="padding:12px 24px;border:2px solid #4257b2;border-radius:10px;background:#4257b2;color:#fff;font-weight:600;cursor:default;">👍 Got it!</button>
+
+                    </div>
+
+                </div>
+
+            </main>
+
+            <footer style="background:#fff;border-top:1px solid #e0e4f0;padding:10px 24px;font-size:12px;color:#6b7280;display:flex;justify-content:space-between;">
+
+                <span>Study session active • ⏱️ ${flashcards.timeRemaining}</span>
+
+                <button id="boss-exit" style="padding:6px 12px;background:#fee2e2;color:#dc2626;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;">✕ Exit Study Mode</button>
+
+            </footer>
+
+        `;
+
+        document.body.appendChild(this.overlay);
+
+        document.getElementById('boss-exit')?.addEventListener('click', () => this.toggle());
+
+    },
+
+    _generateQuizletContent() {
+
+        const sets = [
+
+            { title: "Algebra I: Linear Equations", creator: "Ms. Rodriguez", terms: ["Slope-Intercept Form", "Point-Slope Form", "Standard Form", "Parallel Lines"], mastery: 73 },
+
+            { title: "Biology: Cell Structure", creator: "Dr. Chen", terms: ["Mitochondria", "Ribosome", "Nucleus", "Cell Membrane"], mastery: 58 },
+
+            { title: "Spanish I: Common Verbs", creator: "Sr. Martínez", terms: ["ser", "estar", "tener", "hacer"], mastery: 91 }
+
+        ];
+
+        const selected = sets[Math.floor(Math.random() * sets.length)];
+
+        return {
+
+            setTitle: selected.title, termCount: selected.terms.length,
+
+            currentTerm: selected.terms[Math.floor(Math.random() * selected.terms.length)],
+
+            mastery: selected.mastery, timeRemaining: `${Math.floor(Math.random()*25)+10}:${String(Math.floor(Math.random()*60)).padStart(2,'0')}`
+
+        };
+
+    },
+
+    toggle() {
+
+        // ✅ Safe check for stealth state and showAchievement function
+
+        if (!stealthEnabled && !this.active) {
+
+            if (typeof showAchievement === 'function') showAchievement("🔐 Stealth Mode Disabled");
+
+            return;
+
+        }
+
+        
+
+        if (!this.overlay) this.init();
+
+        this.active = !this.active;
+
+        this.overlay.style.opacity = this.active ? '1' : '0';
+
+        this.overlay.style.pointerEvents = this.active ? 'auto' : 'none';
+
+        
+
+        if (this.active) {
+
+            if (stealthEnabled) StealthManager.apply(this.quizletProfileIndex);
+
+        } else {
+
+            if (stealthEnabled) StealthManager.restore();
+
+        }
+
+    }
+
+};
+
+
+
+// ✅ Define Helpers AFTER StealthManager & BossKey exist
+
+function isStealthEnabled() { return stealthEnabled; }
+
+
+
+function setStealthEnabled(enabled) {
+
+    stealthEnabled = enabled;
+
+    if (!enabled) {
+
+        // Safely restore if StealthManager is ready
+
+        if (StealthManager) StealthManager.restore();
+
+        if (BossKey.active) BossKey.toggle();
+
+    }
+
+    localStorage.setItem('mtr_stealth_enabled', String(enabled));
+
+    console.log(`🔐 Stealth Mode: ${enabled ? 'ENABLED' : 'DISABLED'}`);
+
+}
+
+
+
+function loadStealthPreference() {
+
+    try {
+
+        const saved = localStorage.getItem('mtr_stealth_enabled');
+
+        // Default to true unless explicitly set to false
+
+        setStealthEnabled(saved !== null ? saved === 'true' : true);
+
+    } catch (e) { setStealthEnabled(true); }
+
+}
+
+
+
+// 🔑 HOTKEYS & VISIBILITY AUTO-STEALTH
+
+(function initStealthHooks() {
+
+    StealthManager.init();
+
+    document.addEventListener('visibilitychange', () => {
+
+        if (document.hidden && !BossKey.active && stealthEnabled) {
+
+            StealthManager.randomize();
+
+        } else if (!document.hidden && !stealthEnabled) {
+
+            StealthManager.restore();
+
+        }
+
+    });
+
+    window.addEventListener('keydown', (e) => {
+
+        if (e.altKey && e.key.toLowerCase() === 'h') {
+
+            e.preventDefault();
+
+            if (stealthEnabled) BossKey.toggle();
+
+            else if (typeof showAchievement === 'function') showAchievement("🔐 Stealth Mode Disabled");
+
+        }
+
+        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'o') {
+
+            e.preventDefault();
+
+            if (stealthEnabled) StealthManager.cycle();
+
+        }
+
+    }, { capture: true });
+
+})();
+
+// 🔑 HOTKEYS & VISIBILITY AUTO-STEALTH (RESPECTS stealthEnabled FLAG)
+
+(function initStealthHooks() {
+
+    StealthManager.init();
+
+    
+
+    // Auto-switch when tab loses focus ONLY if stealth is enabled
+
+    document.addEventListener('visibilitychange', () => {
+
+        if (document.hidden && !BossKey.active && isStealthEnabled()) {
+
+            StealthManager.randomize();
+
+        } else if (!document.hidden && !isStealthEnabled()) {
+
+            // Restore original when returning to tab if stealth is disabled
+
+            StealthManager.restore();
+
+        }
+
+    });
+
+
+
+    // Global hotkeys (capture phase to override game controls when needed)
+
+    window.addEventListener('keydown', (e) => {
+
+        // Alt + H: Toggle Boss Key Overlay (only works if stealth enabled)
+
+        if (e.altKey && e.key.toLowerCase() === 'h') {
+
+            e.preventDefault();
+
+            if (isStealthEnabled()) {
+
+                BossKey.toggle();
+
+            } else {
+
+                // Show subtle feedback that stealth is disabled
+
+                showAchievement("🔐 Stealth Mode Disabled");
+
+            }
+
+        }
+
+        // Ctrl + Shift + P: Cycle Tab Profile (only if stealth enabled)
+
+        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'p') {
+
+            e.preventDefault();
+
+            if (isStealthEnabled()) {
+
+                StealthManager.cycle();
+
+            }
+
+        }
+
+    }, { capture: true });
+
+})();function saveUpgrades() {
+
+  try {
+
+    const e = {};
+
+    Object.keys(UPGRADES).forEach(key => {
+
+      e[key] = { unlocked: !!UPGRADES[key].unlocked, claimed: !!UPGRADES[key].claimed };
+
+    });
+
+    localStorage.setItem("mtr_upgrades_v2", JSON.stringify(e));
+
+    localStorage.setItem("mtr_highscore_v2", String(Math.max(highScore, score)));
+
+    console.log("💾 Saved: highScore=", Math.max(highScore, score), "upgrades=", e);
+
+  } catch (e) {
+
+    console.warn("⚠️ Could not save to localStorage:", e);
+
+    try {
+
+      sessionStorage.setItem("mtr_fallback", JSON.stringify({ highScore, upgrades: UPGRADES }));
+
+    } catch (err) {
+
+      console.error("❌ All storage failed");
+
+    }
+
+  }
+
+}
+
+let currentCalibrationIndex = 0;
+
+
+
+function startAntiLanCycle(interval = 5000) {
+
+    if (antiLanTimer) clearInterval(antiLanTimer);
+
+    const overlay = document.getElementById('white-flash-overlay');
+
+    if (!overlay) return;
+
+
+
+    const flash = () => {
+
+        if (!antiLanActive) return;
+
+       
+
+
+
+        // 1. Show Flash
+
+        overlay.style.opacity = '1';
+
+        
+
+        // 2. Resume Game Logic after flash duration
+
+        setTimeout(() => { 
+
+            overlay.style.opacity = '0'; 
+
+        }, FLASH_DURATION);
+
+    };
+
+
+
+    // Initial flash
+
+    flash();
+
+    
+
+    // Set interval for subsequent flashes
+
+    antiLanTimer = setInterval(flash, interval);
+
+}
+
+
+
+// ESC Calibration Listener
+
+window.addEventListener('keydown', (e) => {
+
+    if (e.code === 'Escape' && antiLanActive) {
+
+        e.preventDefault(); 
+
+        e.stopImmediatePropagation();
+
+        currentCalibrationIndex = (currentCalibrationIndex + 1) % CALIBRATION_INTERVALS.length;
+
+        startAntiLanCycle(CALIBRATION_INTERVALS[currentCalibrationIndex]);
+
+        if (typeof showAchievement === 'function') showAchievement(`🔧 CALIBRATED: ${CALIBRATION_INTERVALS[currentCalibrationIndex]/1000}s CYCLE`);
+
+    }
+
+}, { capture: true });
+
+
+
+// Auto-resume on load
+
+window.addEventListener('load', () => {
+
+    if (localStorage.getItem('mtr_anti_lan') === 'true') {
+
+        antiLanActive = true;
+
+        setTimeout(() => startAntiLanCycle(5000), 2000);
+
+    }
+
+});
+
+// 🛡️ ANTI-LANSCHOOL WIZARD CONTROLLER
+
+const AntiLanWizard = {
+
+    step: 1,
+
+    totalSteps: 3,
+
+    selectedInterval: 5000,
+
+    container: null,
+
+    contentEl: null,
+
+    actionsEl: null,
+
+    indicatorEl: null,
+
+    init() {
+
+        this.container = document.getElementById('anti-lan-wizard');
+
+        this.contentEl = document.getElementById('wizard-content');
+
+        this.actionsEl = document.getElementById('wizard-actions');
+
+        this.indicatorEl = document.getElementById('wizard-step-indicator');
+
+    },
+
+    show() {
+
+        if (gameActive) return;
+
+        if (!this.container) this.init();
+
+        this.step = 1;
+
+        this.container.style.display = 'flex';
+
+        this.renderStep();
+
+    },
+
+    hide() {
+
+        if (this.container) this.container.style.display = 'none';
+
+    },
+
+    renderStep() {
+
+        this.indicatorEl.textContent = `STEP ${this.step} OF ${this.totalSteps}`;
+
+        this.contentEl.innerHTML = '';
+
+        this.actionsEl.innerHTML = '';
+
+        switch(this.step) {
+
+            case 1:
+
+                this.contentEl.innerHTML = `
+
+                    <h2 style="color:var(--accent);margin:0 0 12px;font-size:22px;">🛡️ Anti-LanSchool Mode</h2>
+
+                    <p style="color:#c8d6e5;line-height:1.6;font-size:14px;max-width:420px;">
+
+                        This feature helps prevent screen monitoring by periodically flashing a white overlay.
+
+                        Designed for school environments where LanSchool or similar tools are active.
+
+                    </p>
+
+                    <p style="color:#889;font-size:12px;margin-top:8px;">⚠️ Use responsibly. Press <strong>ESC</strong> during gameplay to calibrate timing.</p>
+
+                `;
+
+                this.addAction('🏠 I\'m at Home (Skip)', () => this.skip(), 'btn', 'background:linear-gradient(135deg,#444,#333);color:#aaa;');
+
+                this.addAction('Next →', () => this.next(), 'btn');
+
+                break;
+
+            case 2:
+
+                this.contentEl.innerHTML = `
+
+                    <h2 style="color:var(--gold);margin:0 0 12px;font-size:20px;">⏱️ Sync Interval</h2>
+
+                    <p style="color:#c8d6e5;font-size:14px;margin-bottom:16px;">Choose how often to blind the monitor.</p>
+
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
+
+                        <button class="interval-btn" data-interval="2500">2.5s (Aggressive)</button>
+
+                        <button class="interval-btn active" data-interval="5000">5s (Standard)</button>
+
+                    </div>
+
+                    <p style="color:#889;font-size:11px;margin-top:12px;">💡 Tip: If LanSchool updates every 5s, use 2.5s to guarantee overlap.</p>
+
+                `;
+
+                this.contentEl.querySelectorAll('.interval-btn').forEach(btn => {
+
+                    btn.addEventListener('click', (e) => {
+
+                        this.contentEl.querySelectorAll('.interval-btn').forEach(b => b.classList.remove('active'));
+
+                        e.target.classList.add('active');
+
+                        this.selectedInterval = parseInt(e.target.dataset.interval);
+
+                    });
+
+                });
+
+                this.addAction('← Back', () => this.prev(), 'btn', 'background:rgba(255,255,255,0.1);color:#ccc;');
+
+                this.addAction('Next →', () => this.next(), 'btn');
+
+                break;
+
+            case 3:
+
+                this.contentEl.innerHTML = `
+
+                    <h2 style="color:#2ed573;margin:0 0 12px;font-size:20px;">✅ Ready to Activate</h2>
+
+                    <p style="color:#c8d6e5;font-size:14px;margin-bottom:16px;">Flash Interval: ${this.selectedInterval/1000}s</p>
+
+                    <div style="background:rgba(0,255,213,0.08);border:1px solid rgba(0,255,213,0.2);border-radius:8px;padding:14px;margin-bottom:16px;text-align:left;">
+
+                        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;color:#e6f1ff;font-size:14px;">
+
+                            <input type="checkbox" id="wizard-enable-stealth" checked style="accent-color:var(--accent);width:16px;height:16px;">
+
+                            <span>Enable Stealth Mode (Title/Favicon Spoof + Boss Key)</span>
+
+                        </label>
+
+                        <p style="color:#889;font-size:11px;margin:6px 0 0 26px;">Auto-hides on tab switch. Press <kbd>Alt+H</kbd> for instant overlay.</p>
+
+                    </div>
+
+                    <p style="color:#889;font-size:12px;">Press "Test Flash" to preview, or "Activate" to start.</p>
+
+                `;
+
+                this.addAction('← Back', () => this.prev(), 'btn', 'background:rgba(255,255,255,0.1);color:#ccc;');
+
+                this.addAction('⚡ Test Flash', () => this.testFlash(), 'btn', 'background:linear-gradient(135deg,#ffd700,#e6b800);color:#000;');
+
+                this.addAction('🚀 Activate & Play', () => {
+
+                    const enableStealth = document.getElementById('wizard-enable-stealth')?.checked ?? true;
+
+                    setStealthEnabled(enableStealth); // ✅ ACTUALLY APPLY THE SETTING
+
+                    if (typeof showAchievement === 'function') showAchievement("🛡️ SYSTEMS ACTIVE");
+
+                    this.activate();
+
+                }, 'btn');
+
+                break;
+
+        }
+
+    },
+
+    addAction(text, callback, className = 'btn', style = '') {
+
+        const btn = document.createElement('button');
+
+        btn.className = className;
+
+        btn.textContent = text;
+
+        btn.style.cssText = style;
+
+        btn.addEventListener('click', callback);
+
+        this.actionsEl.appendChild(btn);
+
+    },
+
+    next() { if (this.step < this.totalSteps) { this.step++; this.renderStep(); } },
+
+    prev() { if (this.step > 1) { this.step--; this.renderStep(); } },
+
+    skip() {
+
+        antiLanActive = false;
+
+        setStealthEnabled(false); // ✅ Properly disable stealth
+
+        localStorage.setItem('mtr_anti_lan', 'false');
+
+        this.hide();
+
+        showMenuScreen();
+
+    },
+
+    testFlash() {
+
+        const overlay = document.getElementById('white-flash-overlay');
+
+        if (overlay) {
+
+            overlay.style.opacity = '1';
+
+            setTimeout(() => { overlay.style.opacity = '0'; }, 800);
+
+        }
+
+    },
+
+    activate() {
+
+        antiLanActive = true;
+
+        localStorage.setItem('mtr_anti_lan', 'true');
+
+        if (!CALIBRATION_INTERVALS.includes(this.selectedInterval)) {
+
+            CALIBRATION_INTERVALS.unshift(this.selectedInterval);
+
+        }
+
+        currentCalibrationIndex = 0;
+
+        startAntiLanCycle(this.selectedInterval);
+
+        this.hide();
+
+        showMenuScreen();
+
+    }
+
+};
+
+
+
+// 📌 Make showMenuScreen globally accessible for the wizard & intro
+
+function showMenuScreen() {
+
+  const menu = document.getElementById("menu");
+
+  if (!menu) return;
+
+  menu.classList.add("menu-ready");
+
+  menu.style.setProperty("opacity", "1", "important");
+
+  menu.style.setProperty("pointer-events", "auto", "important");
+
+  menu.style.display = "flex";
+
+  menu.style.zIndex = "1002";
+
+}
+
+    const mats = {
+
+      road: new THREE.MeshStandardMaterial({
+
+        color: 1710629,
+
+        roughness: .95,
+
+        metalness: .1,
+
+        envMapIntensity: .3
+
+      }),
+
+      roadMarkings: new THREE.MeshStandardMaterial({
+
+        color: 16777215,
+
+        emissive: 16777198,
+
+        emissiveIntensity: .3,
+
+        roughness: .3
+
+      }),
+
+      grass: new THREE.MeshStandardMaterial({
+
+        color: 857360,
+
+        roughness: 1,
+
+        metalness: 0
+
+      }),
+
+      building: new THREE.MeshStandardMaterial({
+
+        color: 1975349,
+
+        roughness: .7,
+
+        metalness: .2
+
+      }),
+
+      window: new THREE.MeshStandardMaterial({
+
+        color: 13953279,
+
+        emissive: 8965375,
+
+        emissiveIntensity: 1.2,
+
+        transparent: !0,
+
+        opacity: .9
+
+      }),
+
+      truckBody: new THREE.MeshStandardMaterial({
+
+        color: 2233624,
+
+        metalness: .7,
+
+        roughness: .3,
+
+        envMapIntensity: .5
+
+      }),
+
+      truckCab: new THREE.MeshStandardMaterial({
+
+        color: 657935,
+
+        metalness: .8,
+
+        roughness: .2
+
+      }),
+
+      truckDanger: new THREE.MeshStandardMaterial({
+
+        color: 16724770,
+
+        emissive: 16720401,
+
+        emissiveIntensity: .8,
+
+        roughness: .4
+
+      }),
+
+      playerBody: new THREE.MeshStandardMaterial({
+
+        color: 65493,
+
+        metalness: .6,
+
+        roughness: .2,
+
+        envMapIntensity: .7
+
+      }),
+
+      playerCabin: new THREE.MeshStandardMaterial({
+
+        color: 657938,
+
+        metalness: .9,
+
+        roughness: .1
+
+      }),
+
+      traffic: [new THREE.MeshStandardMaterial({
+
+        color: 4871528,
+
+        metalness: .5,
+
+        roughness: .4
+
+      }), new THREE.MeshStandardMaterial({
+
+        color: 7031370,
+
+        metalness: .4,
+
+        roughness: .5
+
+      }), new THREE.MeshStandardMaterial({
+
+        color: 4877141,
+
+        metalness: .5,
+
+        roughness: .4
+
+      }), new THREE.MeshStandardMaterial({
+
+        color: 5917291,
+
+        metalness: .6,
+
+        roughness: .3
+
+      })],
+
+      headlight: new THREE.MeshStandardMaterial({
+
+        emissive: 16772812,
+
+        emissiveIntensity: 4,
+
+        toneMapped: !1
+
+      }),
+
+      taillight: new THREE.MeshStandardMaterial({
+
+        emissive: 16724804,
+
+        emissiveIntensity: 2.5
+
+      }),
+
+      motorcycleMetal: new THREE.MeshStandardMaterial({
+
+        color: 2763322,
+
+        metalness: .95,
+
+        roughness: .15,
+
+        envMapIntensity: .8
+
+      }),
+
+      motorcycleLeather: new THREE.MeshStandardMaterial({
+
+        color: 1709328,
+
+        metalness: .2,
+
+        roughness: .85
+
+      }),
+
+      motorcycleGlow: new THREE.MeshBasicMaterial({
+
+        color: 65484,
+
+        transparent: !0,
+
+        opacity: .7
+
+      }),
+
+      v8Glow: new THREE.MeshStandardMaterial({
+
+        color: 16739179,
+
+        emissive: 16724787,
+
+        emissiveIntensity: 2,
+
+        metalness: .8
+
+      }),
+
+      tireGlow: new THREE.MeshStandardMaterial({
+
+        color: 5164484,
+
+        emissive: 2271897,
+
+        emissiveIntensity: 1.5
+
+      }),
+
+      nitroGlow: new THREE.MeshStandardMaterial({
+
+        color: 16767293,
+
+        emissive: 16755200,
+
+        emissiveIntensity: 3
+
+      }),
+
+      signGradient: new THREE.ShaderMaterial({
+
+        uniforms: {
+
+          time: {
+
+            value: 0
+
+          },
+
+          color1: {
+
+            value: new THREE.Color(0, 1, 0.85)
+
+          },
+
+          color2: {
+
+            value: new THREE.Color(1, 0.84, 0)
+
+          }
+
+        },
+
+        vertexShader: "varying vec2 vUv; void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}",
+
+        fragmentShader: "uniform float time; uniform vec3 color1, color2; varying vec2 vUv; void main(){vec3 gradient=mix(color1,color2,vUv.x+sin(time*0.5+vUv.y*3.0)*0.1);gl_FragColor=vec4(gradient,0.95);}",
+
+        transparent: !0,
+
+        side: THREE.DoubleSide
+
+      }),
+
+      billboardMaterial: new THREE.ShaderMaterial({
+
+        uniforms: {
+
+          time: {
+
+            value: 0
+
+          },
+
+          glowIntensity: {
+
+            value: 0.8
+
+          }
+
+        },
+
+        vertexShader: "varying vec2 vUv; void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}",
+
+        fragmentShader: "uniform float time, glowIntensity; varying vec2 vUv; void main(){vec3 color=mix(vec3(1.0,0.84,0.0),vec3(0.0,1.0,0.85),vUv.x+sin(time*0.3+vUv.y*2.0)*0.15);float edge=smoothstep(0.0,0.1,distance(vUv,vec2(0.5)));color+=vec3(1.0,0.9,0.3)*glowIntensity*edge*0.5;gl_FragColor=vec4(color,0.98);}",
+
+        transparent: !0,
+
+        side: THREE.DoubleSide
+
+      })
+
+    };
+
+    class ParticleSystem {
+
+      constructor(e, t) {
+
+        this.geometry = new THREE.BufferGeometry, this.positions = new Float32Array(3 * e), this.sizes = new Float32Array(e), this.alphas = new Float32Array(e), this.lifetimes = new Float32Array(e);
+
+        for (let o = 0; o < e; o++) this.lifetimes[o] = 2 * Math.random(), this.resetParticle(o, t);
+
+        this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3)), this.geometry.setAttribute("size", new THREE.BufferAttribute(this.sizes, 1)), this.geometry.setAttribute("alpha", new THREE.BufferAttribute(this.alphas, 1)), this.material = new THREE.PointsMaterial({
+
+          size: .8,
+
+          color: t.color || 8947882,
+
+          transparent: !0,
+
+          opacity: .8,
+
+          sizeAttenuation: !0,
+
+          blending: THREE.AdditiveBlending,
+
+          depthWrite: !1
+
+        }), this.points = new THREE.Points(this.geometry, this.material), this.options = t
+
+      }
+
+      resetParticle(e, t) {
+
+        this.positions[3 * e] = (Math.random() - .5) * (t.spread || .5), this.positions[3 * e + 1] = (t.offsetY || 0) + .3 * Math.random(), this.positions[3 * e + 2] = (t.offsetZ || 0) + .5 * Math.random(), this.sizes[e] = .2 + .6 * Math.random(), this.alphas[e] = .8 + .2 * Math.random()
+
+      }
+
+      update(e, t, o) {
+
+        for (let t = 0; t < this.positions.length / 3; t++) this.lifetimes[t] -= e, this.lifetimes[t] <= 0 && (this.resetParticle(t, this.options), this.lifetimes[t] = 1.5 + 1.5 * Math.random()), this.positions[3 * t + 1] += e * (.5 + .3 * Math.random()), this.positions[3 * t + 2] -= e * (.02 * o + .3), this.positions[3 * t] += Math.sin(.003 * Date.now() + t) * e * .2, this.alphas[t] = Math.max(0, this.lifetimes[t] / 2), this.sizes[t] = (.2 + .6 * Math.random()) * (1 + 2 * (1 - this.lifetimes[t] / 2));
+
+        this.geometry.attributes.position.needsUpdate = !0, this.geometry.attributes.size.needsUpdate = !0, this.geometry.attributes.alpha.needsUpdate = !0, this.points.position.copy(t)
+
+      }
+
+      dispose() {
+
+        this.geometry.dispose(), this.material.dispose()
+
+      }
+
+    }
+
+
+
+    function createFirstPersonMotorcycle() {
+
+      const e = new THREE.Group;
+
+      e.name = "FirstPersonMotorcycle";
+
+      const t = new THREE.CylinderGeometry(.1, .1, 1.8, 14),
+
+        o = new THREE.MeshStandardMaterial({
+
+          color: 2763322,
+
+          metalness: .95,
+
+          roughness: .12,
+
+          envMapIntensity: .8
+
+        }),
+
+        a = new THREE.Mesh(t, o);
+
+      a.rotation.z = Math.PI / 2, a.position.set(0, 1.65, 1.2), e.add(a);
+
+      const s = new THREE.CylinderGeometry(.07, .07, .4, 12),
+
+        n = new THREE.MeshStandardMaterial({
+
+          color: 1184274,
+
+          roughness: .92,
+
+          metalness: .08
+
+        }),
+
+        r = new THREE.Mesh(s, n);
+
+      r.rotation.x = Math.PI / 2, r.position.set(-.75, 1.65, 1.2), e.add(r);
+
+      const i = r.clone();
+
+      i.position.x = .75, e.add(i);
+
+      const c = new THREE.CylinderGeometry(.03, .03, .55, 10),
+
+        d = new THREE.MeshStandardMaterial({
+
+          color: 4868698,
+
+          metalness: .85
+
+        }),
+
+        l = new THREE.Mesh(c, d);
+
+      l.position.set(-.82, 1.75, .9), l.rotation.x = -.25, l.rotation.z = .1, e.add(l);
+
+      const m = new THREE.BoxGeometry(.28, .18, .09),
+
+        p = new THREE.MeshStandardMaterial({
+
+          color: 12312831,
+
+          metalness: .98,
+
+          roughness: .02,
+
+          emissive: 2245734,
+
+          emissiveIntensity: .5
+
+        }),
+
+        h = new THREE.Mesh(m, p);
+
+      h.position.set(-.82, 1.95, .9), h.rotation.x = -.35, h.rotation.z = .15, e.add(h);
+
+      const E = l.clone();
+
+      E.position.x = .82, E.rotation.x = .25, E.rotation.z = -.1, e.add(E);
+
+      const u = h.clone();
+
+      u.position.set(.82, 1.95, .9), u.rotation.x = .35, u.rotation.z = -.15, e.add(u);
+
+      const y = new THREE.CylinderGeometry(.22, .22, .1, 28),
+
+        g = new THREE.MeshStandardMaterial({
+
+          color: 659738,
+
+          emissive: 13124,
+
+          emissiveIntensity: .3,
+
+          metalness: .88,
+
+          roughness: .18
+
+        }),
+
+        M = new THREE.Mesh(y, g);
+
+      M.rotation.x = Math.PI / 2, M.position.set(0, 1.58, .75), e.add(M);
+
+      const w = new THREE.CircleGeometry(.16, 32),
+
+        T = new THREE.MeshBasicMaterial({
+
+          color: 4386,
+
+          side: THREE.DoubleSide
+
+        }),
+
+        R = new THREE.Mesh(w, T);
+
+      R.position.set(0, 1.59, .81), R.rotation.x = Math.PI, e.add(R);
+
+      const f = new THREE.BoxGeometry(.03, .16, .02),
+
+        H = new THREE.MeshBasicMaterial({
+
+          color: 16729173
+
+        }),
+
+        v = new THREE.Mesh(f, H);
+
+      v.position.set(0, 1.59, .82), v.rotation.z = -.5, v.userData = {
+
+        baseRotation: -.5,
+
+        maxRotation: 1.3
+
+      }, e.add(v), e.userData.speedometerNeedle = v;
+
+      const S = new THREE.PlaneGeometry(.12, .06),
+
+        x = new THREE.MeshBasicMaterial({
+
+          color: 65484,
+
+          transparent: !0,
+
+          opacity: .9
+
+        }),
+
+        G = new THREE.Mesh(S, x);
+
+      G.position.set(0, 1.54, .82), G.rotation.x = Math.PI, e.add(G);
+
+      const I = new THREE.SphereGeometry(.28, 24, 24),
+
+        C = new THREE.MeshBasicMaterial({
+
+          color: 16777198,
+
+          transparent: !0,
+
+          opacity: .95
+
+        }),
+
+        P = new THREE.Mesh(I, C);
+
+      P.position.set(0, 1.58, 1.35), e.add(P);
+
+      const b = new THREE.RingGeometry(.3, .6, 32),
+
+        k = new THREE.MeshBasicMaterial({
+
+          color: 16777164,
+
+          transparent: !0,
+
+          opacity: .4,
+
+          side: THREE.DoubleSide
+
+        }),
+
+        A = new THREE.Mesh(b, k);
+
+      A.position.set(0, 1.58, 1.36), A.rotation.x = Math.PI / 2, e.add(A);
+
+      const B = new THREE.CylinderGeometry(.08, .08, 1, 12),
+
+        D = new THREE.MeshStandardMaterial({
+
+          color: 3816010,
+
+          metalness: .8
+
+        }),
+
+        L = new THREE.Mesh(B, D);
+
+      L.position.set(-.5, 1.05, 1.5), L.rotation.x = .15, e.add(L);
+
+      const z = L.clone();
+
+      z.position.x = .5, e.add(z);
+
+      const U = new THREE.SphereGeometry(.4, 20, 20, 0, 2 * Math.PI, 0, Math.PI / 2),
+
+        F = new THREE.MeshStandardMaterial({
+
+          color: 56780,
+
+          metalness: .88,
+
+          roughness: .22,
+
+          envMapIntensity: .7
+
+        }),
+
+        N = new THREE.Mesh(U, F);
+
+      N.position.set(0, 1.45, .35), N.rotation.x = Math.PI, e.add(N);
+
+      const O = new THREE.TorusGeometry(.38, .04, 8, 24, Math.PI),
+
+        W = new THREE.MeshBasicMaterial({
+
+          color: 34986
+
+        }),
+
+        j = new THREE.Mesh(O, W);
+
+      j.position.set(0, 1.45, .35), j.rotation.x = Math.PI / 2, j.rotation.z = Math.PI / 2, e.add(j);
+
+      const _ = new THREE.TorusGeometry(.05, .015, 8, 16),
+
+        $ = new THREE.MeshBasicMaterial({
+
+          color: 6719743,
+
+          transparent: !0,
+
+          opacity: .6
+
+        }),
+
+        K = new THREE.Mesh(_, $);
+
+      K.position.set(-.75, 1.65, 1.2), K.rotation.x = Math.PI / 2, K.userData = {
+
+        baseScale: 1,
+
+        speed: 0
+
+      }, e.add(K);
+
+      const V = K.clone();
+
+      return V.position.x = .75, V.userData = {
+
+        baseScale: 1,
+
+        speed: 0
+
+      }, e.add(V), e.userData.vibrationElements = [K, V], e.position.y = 0, e
+
+    }
+
+    const EMERGENCY_CORN_ACTIVE = false; // Global flag
+
+
+
+const QualityManager = {
+
+    tier: 0, // 0=POTATO, 1=LOW, 2=MED, 3=HIGH
+
+    fpsBuffer: [],
+
+    bufferSize: 50,
+
+    dropThreshold: 28,
+
+    emergencyThreshold: 18, // FPS < 18 for 3s triggers corn
+
+    sustainSecs: 1.5,
+
+    emergencySustain: 3.0,
+
+    lowFpsAccum: 0,
+
+    emergencyAccum: 0,
+
+    upgradeCooldown: 0,
+
+
+
+    init() {
+
+        this.fpsBuffer = new Array(this.bufferSize).fill(30);
+
+        this.apply(); // Apply potato mode immediately on weak devices
+
+    },
+
+
+
+    update(delta) {
+
+        if (!gameActive) return;
+
+        const fps = 1 / Math.max(delta, 0.001);
+
+        this.fpsBuffer.push(fps);
+
+        if (this.fpsBuffer.length > this.bufferSize) this.fpsBuffer.shift();
+
+
+
+        const avg = this.fpsBuffer.reduce((a, b) => a + b, 0) / this.fpsBuffer.length;
+
+
+
+        // Standard tier management
+
+        if (avg < this.dropThreshold) {
+
+            this.lowFpsAccum += delta;
+
+            if (this.lowFpsAccum >= this.sustainSecs && this.tier < 3) {
+
+                this.setTier(Math.min(this.tier + 1, 3));
+
+                this.lowFpsAccum = 0;
+
+            }
+
+        } else {
+
+            this.lowFpsAccum = Math.max(0, this.lowFpsAccum - delta * 2);
+
+            if (avg > 45 && this.lowFpsAccum <= 0 && this.tier > 0 && this.upgradeCooldown <= 0) {
+
+                this.setTier(this.tier - 1);
+
+                this.upgradeCooldown = 8;
+
+            }
+
+        }
+
+        this.upgradeCooldown -= delta;
+
+
+
+        // 🚨 EMERGENCY CORN FIELD TRIGGER
+
+        if (avg < this.emergencyThreshold) {
+
+            this.emergencyAccum += delta;
+
+            if (this.emergencyAccum >= this.emergencySustain && !EMERGENCY_CORN_ACTIVE) {
+
+                window.EMERGENCY_CORN_ACTIVE = true;
+
+                if (typeof showAchievement === 'function') showAchievement("🌽 EMERGENCY: CORN FIELD MODE");
+
+                this.apply();
+
+            }
+
+        } else {
+
+            this.emergencyAccum = Math.max(0, this.emergencyAccum - delta * 1.5);
+
+            if (this.emergencyAccum <= 0 && window.EMERGENCY_CORN_ACTIVE) {
+
+                window.EMERGENCY_CORN_ACTIVE = false;
+
+                if (typeof showAchievement === 'function') showAchievement("🏙️ BUILDINGS RESTORED");
+
+                this.apply();
+
+            }
+
+        }
+
+    },
+
+
+
+    setTier(t) {
+
+        this.tier = Math.max(0, Math.min(3, t));
+
+        this.apply();
+
+        const names = ["🥔 POTATO (480p)", "📉 LOW", "📊 MED", "💎 HIGH"];
+
+        if (typeof showAchievement === 'function') showAchievement(`⚙️ ${names[this.tier]}`);
+
+    },
+
+
+
+    apply() {
+
+        if (!renderer || !composer) return;
+
+        const t = this.tier;
+
+        const isPotatoOrCorn = (t === 0 || window.EMERGENCY_CORN_ACTIVE);
+
+
+
+        // 🖥️ HARD 480p CAP
+
+        let targetW = window.innerWidth;
+
+        let targetH = window.innerHeight;
+
+        if (isPotatoOrCorn) {
+
+            const aspect = targetW / targetH;
+
+            targetH = 480;
+
+            targetW = Math.round(480 * aspect);
+
+        }
+
+
+
+        const pr = isPotatoOrCorn ? 1.0 : (t === 1 ? 0.75 : t === 2 ? 1.0 : Math.min(window.devicePixelRatio, 1.5));
+
+        
+
+        renderer.setPixelRatio(pr);
+
+        renderer.setSize(targetW, targetH, true);
+
+        composer.setSize(targetW, targetH);
+
+
+
+        // Strip heavy effects
+
+        renderer.shadowMap.enabled = t >= 2;
+
+        renderer.toneMapping = t >= 2 ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+
+        
+
+        composer.passes.forEach(pass => {
+
+            if (pass instanceof THREE.UnrealBloomPass) pass.enabled = t >= 3;
+
+            if (pass instanceof THREE.ShaderPass && pass.uniforms?.grainAmount) pass.enabled = t >= 2;
+
+            if (pass instanceof THREE.ShaderPass && pass.uniforms?.tPrev) pass.enabled = false; // Kill motion blur
+
+        });
+
+
+
+        // View distance & particles
+
+        CONFIG.viewDistance = isPotatoOrCorn ? 8 : t === 1 ? 10 : t === 2 ? 12 : 15;
+
+        if (player?.exhaustLeft) {
+
+            const scale = isPotatoOrCorn ? 0 : t === 1 ? 0.4 : 1;
+
+            player.exhaustLeft.material.size = 0.6 * scale;
+
+            player.exhaustRight.material.size = 0.6 * scale;
+
+            player.exhaustLeft.points.visible = scale > 0;
+
+            player.exhaustRight.points.visible = scale > 0;
+
+        }
+
+    }
+
+};
+
+
+
+    function initMenuParticles() {
+
+      const container = document.getElementById('menu-particles');
+
+      if (!container) return;
+
+      container.innerHTML = '';
+
+      for (let i = 0; i < 25; i++) {
+
+        const particle = document.createElement('div');
+
+        particle.className = 'menu-particle';
+
+        particle.style.left = Math.random() * 100 + '%';
+
+        particle.style.animationDelay = Math.random() * 8 + 's';
+
+        container.appendChild(particle)
+
+      }
+
+    }
+
+
+
+    function createIntroCinematic() {
+
+      const container = document.getElementById('intro-cinematic');
+
+      container.innerHTML = '';
+
+      container.className = 'intro-cinematic active';
+
+      for (let i = 0; i < 40; i++) {
+
+        const p = document.createElement('div');
+
+        p.className = 'intro-particle' + (Math.random() > .5 ? ' gold' : '');
+
+        p.style.setProperty('--tx', (Math.random() - .5) * 200 + 'px');
+
+        p.style.left = Math.random() * 100 + '%';
+
+        p.style.animationDelay = Math.random() * 2 + 's';
+
+        container.appendChild(p)
+
+      }
+
+      const glitch = document.createElement('div');
+
+      glitch.className = 'intro-glitch';
+
+      container.appendChild(glitch)
+
+    }
+
+
+
+    function generateRandomIntro() {
+
+      const intros = [{
+
+        title: "SYSTEM BREACH DETECTED",
+
+        subtitle: "Unauthorized executable: MR_TRUCKS_REVENGE.html",
+
+        humor: "<strong>Knips:</strong> \"I just wanted to block one HTML file... why is it deploying to 47 schools?\""
+
+      }, {
+
+        title: "POLICY VIOLATION",
+
+        subtitle: "User Desmond attempted to run game without IT approval",
+
+        humor: "<strong>Knips:</strong> \"The 'green button' was NOT supposed to mean 'approve everything forever'!\""
+
+      }, {
+
+        title: "NETWORK ANOMALY",
+
+        subtitle: "Suspicious activity: Fun detected on school devices",
+
+        humor: "<strong>Knips:</strong> \"My LanSchool dashboard just showed 300 students playing the same truck game. I need a new job.\""
+
+      }, {
+
+        title: "SECURITY ALERT",
+
+        subtitle: "File checksum mismatch: This isn't a spreadsheet!",
+
+        humor: "<strong>Knips:</strong> \"I ran the virus scan and it just said 'vibes: immaculate'. That's not a real result!\""
+
+      }, {
+
+        title: "ADMIN OVERRIDE",
+
+        subtitle: "Rebecca Knips has been... distracted by a cat video",
+
+        humor: "<strong>Knips:</strong> \"Wait, why does the 'Block' button have a tiny truck emoji on it now?\""
+
+      }];
+
+      return intros[Math.floor(Math.random() * intros.length)]
+
+    }
+
+
+
+    function initIntro() {
+
+    const introData = generateRandomIntro();
+
+    createIntroCinematic();
+
+    const e = document.getElementById("intro-screen"),
+
+          t = document.getElementById("intro-text"),
+
+          o = document.getElementById("knips-popup"),
+
+          a = document.getElementById("knips-dialogue"),
+
+          s = document.getElementById("knips-stamp"),
+
+          n = document.getElementById("knips-ticket"),
+
+          r = document.querySelector(".terminal-box");
+
+    n.textContent = `#TKT-${Math.floor(4000+Math.random()*999)}`;
+
+    let i = !1, c = [];
+
+
+
+    // 🛡️ Safe Menu Transition (Scoped locally)
+
+    function showMenuScreen() {
+
+        const menu = document.getElementById("menu");
+
+        if (!menu) return;
+
+        menu.classList.add("menu-ready");
+
+        menu.style.setProperty("opacity", "1", "important");
+
+        menu.style.setProperty("pointer-events", "auto", "important");
+
+        menu.style.display = "flex";
+
+        menu.style.zIndex = "1002";
+
+    }
+
+
+
+    // 🛡️ Skip/End Handler
+
+    // 🛡️ Skip/End Handler
+
+function f() {
+
+    if (i) return;
+
+    i = !0;
+
+    // Clear all pending typewriter timeouts
+
+    c.forEach(el => clearTimeout(el)); 
+
+    c = [];
+
+    
+
+    // Fade out intro screen
+
+    e.classList.add("fade-out");
+
+    
+
+    // Wait for fade, then hide intro and show wizard
+
+    setTimeout(() => {
+
+        e.style.display = "none";
+
+        // Ensure wizard container exists before showing
+
+        if (!document.getElementById('anti-lan-wizard')) {
+
+            console.error("❌ Wizard HTML missing! Check step 1.");
+
+            showMenuScreen(); // Fallback to menu if wizard is broken
+
+        } else {
+
+            AntiLanWizard.show();
+
+        }
+
+    }, 600);
+
+}
+
+
+
+    // ⚡ Skip handlers are armed AFTER the boot gate (bottom of initIntro)
+const armSkip = () => {
+window.addEventListener("keydown", f, { once: !0 });
+e.addEventListener("click", f);
+};
+
+    e.addEventListener("click", f);
+
+
+
+    // Typewriter Engine
+
+    function d(element, text, speed = 28, callback) {
+
+        let idx = 0;
+
+        element.innerHTML = "";
+
+        const cursor = document.createElement("span");
+
+        cursor.className = "cursor";
+
+        element.appendChild(cursor);
+
+        function type() {
+
+            if (i) {
+
+                element.innerHTML = text.replace(/\n/g, "<br>");
+
+                return callback && callback();
+
+            }
+
+            if (idx < text.length) {
+
+                if (text[idx] === "\n") element.insertBefore(document.createElement("br"), cursor);
+
+                else element.insertBefore(document.createTextNode(text[idx]), cursor);
+
+                idx++;
+
+                c.push(setTimeout(type, speed + 12 * Math.random()));
+
+            } else {
+
+                callback && callback();
+
+            }
+
+        }
+
+        type();
+
+    }
+
+
+// Start Dialogue Chain (fired by the boot gate below)
+const beginCinematic = () => c.push(setTimeout(() => {
+
+        d(t, `> AUTHENTICATING: R.KNIPS (IT SUPPORT TIER 1)\n> SCANNING Knips Naughty List...\n> ⚠️ ${introData.title.toUpperCase()}\n> ${introData.subtitle}\n> INITIATING REMOTE TERMINATION...`, 22, () => {
+
+            c.push(setTimeout(() => {
+
+                o.classList.add("show");
+
+                d(a, `Desmond. Ticket ${n.textContent}. Again.\n${introData.humor.includes('Knips') ? introData.humor : `The Computer Use Contract clearly states section 1: "I will use my computer as a tool to learn."`}\nI'm running the standard 'Block & Notify' macro...`, 30, () => {
+
+                    c.push(setTimeout(() => {
+
+                        const execMsg = document.createElement("div");
+
+                        execMsg.style.cssText = "color:#ffaa00;margin-top:8px;font-size:13px;";
+
+                        execMsg.textContent = "> EXECUTING: BLOCK_MACRO_V3.exe ...";
+
+                        t.appendChild(execMsg);
+
+                        c.push(setTimeout(() => {
+
+                            d(a, `*clicks system prompt*\nWait. Why did it say 'Deploy District-Wide'?\nI clicked the green button. The green button always means block.`, 26, () => {
+
+                                c.push(setTimeout(() => {
+
+                                    s.textContent = "ALLOWED";
+
+                                    s.className = "knips-stamp stamp-allowed stamp-slam";
+
+                                    r.classList.add("shake");
+
+                                    setTimeout(() => r.classList.remove("shake"), 350);
+
+                                    c.push(setTimeout(() => {
+
+                                        d(a, `...Did I just whitelist it district-wide?\nI'm going to need you to submit a helpdesk ticket for this.\nI'll be at my desk. Rebooting.`, 34, () => {
+
+                                            c.push(setTimeout(() => {
+
+  e.classList.add("fade-out");
+
+  setTimeout(() => {
+
+    e.style.display = "none";
+
+    if (!document.getElementById('anti-lan-wizard')) {
+
+      console.warn("⚠️ Wizard missing, skipping to preloader");
+
+      PreloadManager.init(); // 🔄 FALLBACK
+
+    } else {
+
+      // Show wizard first, then preloader when user clicks "Activate" or "Skip"
+
+      AntiLanWizard.show();
+
+      // Hijack wizard completion to trigger preloader
+
+      const origActivate = AntiLanWizard.activate.bind(AntiLanWizard);
+
+      const origSkip = AntiLanWizard.skip.bind(AntiLanWizard);
+
+      AntiLanWizard.activate = () => { origActivate(); PreloadManager.init(); };
+
+      AntiLanWizard.skip = () => { origSkip(); PreloadManager.init(); };
+
+    }
+
+  }, 600);
+
+}, 2600));
+
+                                        });
+
+                                    }, 700));
+
+                                }, 500));
+
+                            });
+
+                        }, 900));
+
+                    }, 400));
+
+                });
+
+            }, 500));
+
+        });
+
+}, 600));
+/* ⚡ BOOT GATE — "PRESS SPACE TO BEGIN"
+Browsers refuse to start audio without a real user gesture
+(the exact error in your console). The terminal now waits:
+first Space (or click) unlocks audio, starts the Knips theme,
+and kicks off the cinematic. Skip is armed only AFTER boot. */
+const bootHint = document.querySelector(".skip-hint");
+if (bootHint) {
+bootHint.textContent = "▶ PRESS SPACE TO BEGIN ◀";
+bootHint.style.fontSize = "15px";
+bootHint.style.color = "#00ffd5";
+bootHint.style.letterSpacing = "2.5px";
+bootHint.style.textShadow = "0 0 14px rgba(0,255,213,.8)";
+}
+t.innerHTML = '> SESSION R.KNIPS — CONSOLE READY<span class="cursor"></span>';
+const boot = (ev) => {
+if (ev.isTrusted === false) return; // ignore synthetic events (mobile button macros)
+if (ev.type === "keydown" && ev.code !== "Space") return; // Space or click only
+window.removeEventListener("keydown", boot);
+e.removeEventListener("click", boot);
+if (bootHint) {
+bootHint.textContent = "[ PRESS ANY KEY OR CLICK TO BYPASS IT PROTOCOL ]";
+bootHint.style.fontSize = "";
+bootHint.style.color = "";
+bootHint.style.letterSpacing = "";
+bootHint.style.textShadow = "";
+}
+const dot = document.querySelector(".status-dot");
+if (dot) {
+dot.style.background = "#2ed573";
+dot.style.boxShadow = "0 0 10px #2ed573, 0 0 20px rgba(46,213,115,.5)";
+}
+beginCinematic();
+armSkip();
+};
+window.addEventListener("keydown", boot);
+e.addEventListener("click", boot);
+}
+// 🖥️ NEO MENU CONTROLLER (Zero-Resemblance Enhancement)
+const NeoMenu = {
+
+  logEl: null,
+
+  init() {
+
+    this.logEl = document.getElementById('neo-log');
+
+    if (!this.logEl) return;
+
+    this.bindInteractions();
+
+    this.startAmbientLogs();
+
+  },
+
+  bindInteractions() {
+
+    document.querySelectorAll('.neo-btn').forEach(btn => {
+
+      btn.addEventListener('mouseenter', () => {
+
+        const msg = btn.getAttribute('data-log');
+
+        if (msg) this.addLog(msg, '#00ffd5');
+
+      });
+
+      btn.addEventListener('click', () => {
+
+        this.addLog('> EXECUTING...', '#ffd700');
+
+        setTimeout(() => this.addLog('> ACCESS GRANTED.', '#2ed573'), 350);
+
+      });
+
+    });
+
+  },
+
+  addLog(text, color = '#00ff88') {
+
+    const line = document.createElement('div');
+
+    line.className = 'neo-log-line';
+
+    line.style.animation = 'none';
+
+    line.style.opacity = '1';
+
+    line.style.color = color;
+
+    line.textContent = text;
+
+    this.logEl.appendChild(line);
+
+    if (this.logEl.children.length > 8) this.logEl.removeChild(this.logEl.firstChild);
+
+  },
+
+  startAmbientLogs() {
+
+    const msgs = [
+
+      '> Preloading Mr. Truck...',
+
+      '> LANSCHOOL DAEMON: Protection Ready',
+
+      '> ROAD GEN: Buttery 60FPS',
+
+      '> KNIPS OVERRIDE: READY',
+
+      '> SYNCING UPGRADE CACHE...'
+
+    ];
+
+    setInterval(() => {
+
+      const menu = document.getElementById('menu');
+
+      if (menu && menu.style.opacity === '1') {
+
+        this.addLog(msgs[Math.floor(Math.random() * msgs.length)], '#7a94b8');
+
+      }
+
+    }, 3800);
+
+  }
+
+};
+
+
+
+// Hook into existing flow safely
+
+document.addEventListener('DOMContentLoaded', () => {
+
+  if (typeof showMenuScreen === 'function') {
+
+    const origShow = showMenuScreen;
+
+    window.showMenuScreen = function() {
+
+      origShow();
+
+      setTimeout(() => NeoMenu.init(), 100);
+
+    };
+
+  }
+
+  NeoMenu.init();
+
+});
+
+    function init() {
+
+function loadStealthPreference() {
+
+    try {
+
+        const saved = localStorage.getItem('mtr_stealth_enabled');
+
+        if (saved !== null) {
+
+            setStealthEnabled(saved === 'true');
+
+        }
+
+        // If no saved preference, default to true (stealth on)
+
+    } catch (e) {
+
+        console.warn('⚠️ Could not load stealth preference:', e);
+
+        setStealthEnabled(true);
+
+    }
+
+}
+
+loadStealthPreference(); // ✅ ADD THIS LINE
+
+      loadGameSettings();
+
+loadUpgrades(), QualityManager.init(), initMenuParticles(), initIntro(), scene = new THREE.Scene, scene.background = new THREE.Color(131590), scene.fog = new THREE.FogExp2(197386, .0035), camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, .1, 1500), camera.position.set(0, 15, 40), // 📉 HARDWARE-AWARE RENDERER INIT (Replace existing renderer/composer block)
+
+renderer = new THREE.WebGLRenderer({
+
+antialias: false,
+
+preserveDrawingBuffer: true,
+
+    powerPreference: "high-performance",
+
+    alpha: false
+
+});
+
+renderer.setPixelRatio(1.0); // Hard cap DPR. Mobile 3x DPR kills weak CPUs.
+
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+renderer.shadowMap.enabled = false; // Disabled by default. Re-enabled only on Tier 2+.
+
+renderer.shadowMap.type = THREE.BasicShadowMap;
+
+renderer.toneMapping = THREE.NoToneMapping; // ACES Filmic is too heavy
+
+renderer.toneMappingExposure = 1.0;
+
+document.getElementById("canvas-container").appendChild(renderer.domElement);
+
+
+
+composer = new EffectComposer(renderer);
+
+composer.addPass(new RenderPass(scene, camera));
+
+
+
+// Only enable FXAA. Strip Bloom, FilmGrain, MotionBlur for weak devices.
+
+const fxaapass = new ShaderPass(FXAAShader);
+
+fxaapass.material.uniforms.resolution.value.set(1 / window.innerWidth, 1 / window.innerHeight);
+
+composer.addPass(fxaapass);
+
+// Heavy post-processing passes removed. Re-enabled dynamically by QualityManager if FPS allows.
+
+      const s = new THREE.DirectionalLight(13427967, .6);
+
+      s.position.set(80, 120, -40), s.castShadow = !0, s.shadow.mapSize.set(2048, 2048), s.shadow.camera.near = 10, s.shadow.camera.far = 800, s.shadow.camera.left = -250, s.shadow.camera.right = 250, s.shadow.camera.top = 250, s.shadow.camera.bottom = -250, s.shadow.bias = -.001, scene.add(s);
+
+      const n = new THREE.DirectionalLight(6719743, .3);
+
+      n.position.set(-50, 30, 80), scene.add(n);
+
+      const r = new THREE.DirectionalLight(2241365, .2);
+
+      r.position.set(20, 10, -100), scene.add(r), player = createPlayerCar(), player.group.position.set(0, 1, 0), scene.add(player.group), player.z = 0, player.exhaustLeft = new ParticleSystem(30, {
+
+        color: 8952234,
+
+        spread: .3,
+
+        offsetY: .3,
+
+        offsetZ: -2.8
+
+      }), player.exhaustRight = new ParticleSystem(30, {
+
+        color: 8952234,
+
+        spread: .3,
+
+        offsetY: .3,
+
+        offsetZ: -2.8
+
+      }), scene.add(player.exhaustLeft.points), scene.add(player.exhaustRight.points), motorcycleGroup = createFirstPersonMotorcycle(), motorcycleGroup.visible = !1, motorcycleGroup.position.set(0, 0, 0), scene.add(motorcycleGroup), truck = createMrTruck(), truck.group.visible = !1, scene.add(truck.group), highwayManager = new HighwayManager, initPreloader(), initSpeedLines(), window.addEventListener("resize", onResize), window.addEventListener("keydown", e => {
+
+        keys[e.code] = !0, e.preventDefault(), null === cameraHintTimeout && gameActive && showCameraHint(), "KeyC" === e.code && gameActive && switchCameraMode()
+
+      }), window.addEventListener("keyup", e => {
+
+        keys[e.code] = !1, e.preventDefault()
+
+      }), document.getElementById("btn-start").onclick = startGame, document.getElementById("btn-restart").onclick = resetGame, document.getElementById("btn-shop").onclick = openShop, document.getElementById("btn-shop-go").onclick = openShop, document.getElementById("shop-close").onclick = closeShop, document.getElementById("btn-back").onclick = closeShop, document.getElementById("claim-v8").onclick = () => claimUpgrade("v8"), document.getElementById("claim-tires").onclick = () => claimUpgrade("tires"), document.getElementById("claim-nitro").onclick = () => claimUpgrade("nitro"), onResize(), updateShopUI(), animate()
+
+    }
+
+
+
+    function openShop() {
+
+      const e = document.getElementById("menu"),
+
+        t = document.getElementById("game-over");
+
+      e.classList.remove("menu-ready"), e.style.setProperty("opacity", "0", "important"), e.style.setProperty("pointer-events", "none", "important"), t.style.setProperty("opacity", "0", "important"), t.style.setProperty("pointer-events", "none", "important"), document.getElementById("shop-panel").classList.add("active"), document.getElementById("shop-highscore").textContent = Math.max(highScore, score).toLocaleString(), updateShopUI()
+
+    }
+
+
+
+    function closeShop() {
+
+      document.getElementById("shop-panel").classList.remove("active");
+
+      const e = document.getElementById("menu");
+
+      e.classList.add("menu-ready"), e.style.setProperty("opacity", "1", "important"), e.style.setProperty("pointer-events", "auto", "important"), e.style.display = "flex", e.style.zIndex = "1002"
+
+    }
+
+
+
+    function updateShopUI() {
+
+      const e = Math.max(highScore, score);
+
+      Object.keys(UPGRADES).forEach(t => {
+
+        const o = UPGRADES[t],
+
+          a = document.getElementById(`upgrade-${t}`),
+
+          s = document.getElementById(`${t}-status`),
+
+          n = document.getElementById(`${t}-progress`),
+
+          r = document.getElementById(`claim-${t}`);
+
+        if (!o.unlocked && e >= o.requirement && (o.unlocked = !0, saveUpgrades(), showAchievement(`${t.toUpperCase()} UNLOCKED!`)), o.claimed) a.classList.add("owned"), s.textContent = "✓ Equipped", n.style.width = "100%", r.disabled = !0, r.textContent = "EQUIPPED";
+
+        else if (o.unlocked) a.classList.remove("owned"), s.textContent = "Ready to claim!", n.style.width = "100%", r.disabled = !1, r.textContent = "CLAIM";
+
+        else {
+
+          a.classList.remove("owned");
+
+          const t = Math.min(100, Math.floor(e / o.requirement * 100));
+
+          s.textContent = `Progress: ${t}%`, n.style.width = `${t}%`, r.disabled = !0, r.textContent = `LOCKED (${o.requirement.toLocaleString()} pts)`
+
+        }
+
+      })
+
+    }
+
+
+
+    function claimUpgrade(e) {
+
+      const t = UPGRADES[e];
+
+      t.unlocked && !t.claimed && (t.claimed = !0, saveUpgrades(), createUpgradeParticles(e), showAchievement(`${e.toUpperCase()} EQUIPPED!`), updateShopUI(), applyUpgradeEffects())
+
+    }
+
+
+
+    function createUpgradeParticles(e) {
+
+      for (let t = 0; t < 20; t++) setTimeout(() => {
+
+        const t = document.createElement("div");
+
+        t.className = "upgrade-particle", t.style.background = `hsl(${60*Math.random()+("v8"===e?0:"tires"===e?160:45)}, 100%, 60%)`, t.style.left = 50 + 30 * (Math.random() - .5) + "%", t.style.top = 50 + 20 * (Math.random() - .5) + "%", t.style.boxShadow = `0 0 10px hsl(${60*Math.random()+("v8"===e?0:"tires"===e?160:45)}, 100%, 70%)`, document.body.appendChild(t), setTimeout(() => t.remove(), 1e3)
+
+      }, 50 * t)
+
+    }
+
+
+
+    function applyUpgradeEffects() {
+
+      if (UPGRADES.v8.claimed && !player.v8Glow) {
+
+        const e = new THREE.BoxGeometry(2.5, .3, 1);
+
+        player.v8Glow = new THREE.Mesh(e, mats.v8Glow), player.v8Glow.position.set(0, .5, -2), player.group.add(player.v8Glow)
+
+      }
+
+      if (UPGRADES.tires.claimed && player.group.traverse(e => {
+
+          e.isMesh && e.geometry && "CylinderGeometry" === e.geometry.type && e.material !== mats.tireGlow && (e.material = mats.tireGlow)
+
+        }), UPGRADES.nitro.claimed && !player.nitroGlow) {
+
+        const e = new THREE.ConeGeometry(.5, 2, 8);
+
+        player.nitroGlow = new THREE.Mesh(e, mats.nitroGlow), player.nitroGlow.position.set(0, .3, -3), player.nitroGlow.rotation.x = Math.PI, player.nitroGlow.visible = !1, player.group.add(player.nitroGlow)
+
+      }
+
+    }
+
+
+
+    function showAchievement(e) {
+
+      const t = document.getElementById("achievement");
+
+      t.textContent = `🏆 ${e}`, t.classList.add("show"), setTimeout(() => t.classList.remove("show"), 3e3)
+
+    }
+
+
+
+    function createPlayerCar() {
+
+      const e = new THREE.Group,
+
+        t = new THREE.Mesh(new THREE.BoxGeometry(2.3, .85, 4.8), mats.playerBody);
+
+      t.castShadow = !0, t.position.y = .65, e.add(t);
+
+      const o = new THREE.Mesh(new THREE.BoxGeometry(2, .75, 2.8), mats.playerCabin);
+
+      o.position.set(0, 1.35, -.7), o.castShadow = !0, e.add(o);
+
+      const a = new THREE.Mesh(new THREE.PlaneGeometry(1.8, .9), new THREE.MeshStandardMaterial({
+
+        color: 10079487,
+
+        metalness: .9,
+
+        roughness: .05,
+
+        transparent: !0,
+
+        opacity: .7
+
+      }));
+
+      a.position.set(0, 1.4, -2), a.rotation.x = .3, e.add(a);
+
+      const s = new THREE.CylinderGeometry(.42, .42, .45, 16),
+
+        n = new THREE.MeshStandardMaterial({
+
+          color: 657935,
+
+          metalness: .8,
+
+          roughness: .3
+
+        });
+
+      [
+
+        [-1.15, .42, 1.6],
+
+        [1.15, .42, 1.6],
+
+        [-1.15, .42, -1.6],
+
+        [1.15, .42, -1.6]
+
+      ].forEach(t => {
+
+        const o = new THREE.Mesh(s, n);
+
+        o.rotation.z = Math.PI / 2, o.position.set(...t), o.castShadow = !0, e.add(o)
+
+      });
+
+      const r = new THREE.BoxGeometry(.45, .25, .15),
+
+        i = new THREE.Mesh(r, mats.headlight);
+
+      i.position.set(-.7, .7, 2.45), e.add(i);
+
+      const c = i.clone();
+
+      c.position.x = .7, e.add(c);
+
+      const d = new THREE.ConeGeometry(8, 40, 8, 1, !0),
+
+        l = new THREE.MeshBasicMaterial({
+
+          color: 16772812,
+
+          transparent: !0,
+
+          opacity: .08,
+
+          side: THREE.DoubleSide
+
+        }),
+
+        m = new THREE.Mesh(d, l);
+
+      m.position.set(-.7, .75, 2.5), m.rotation.x = -Math.PI / 2, m.scale.y = .7, e.add(m);
+
+      const p = m.clone();
+
+      p.position.x = .7, e.add(p);
+
+      const h = new THREE.BoxGeometry(.45, .25, .15),
+
+        E = new THREE.Mesh(h, mats.taillight);
+
+      E.position.set(-.7, .7, -2.45), e.add(E);
+
+      const u = E.clone();
+
+      u.position.x = .7, e.add(u);
+
+      const y = new THREE.Mesh(new THREE.BoxGeometry(2.4, .15, .6), new THREE.MeshStandardMaterial({
+
+        color: 52394,
+
+        metalness: .7,
+
+        roughness: .2
+
+      }));
+
+      return y.position.set(0, 1.6, -2.3), e.add(y), {
+
+        group: e,
+
+        speed: 0,
+
+        steer: 0,
+
+        vx: 0,
+
+        vz: 0,
+
+        exhaustLeft: null,
+
+        exhaustRight: null
+
+      }
+
+    }
+
+
+
+    function createMrTruck() {
+
+      const e = new THREE.Group,
+
+        t = new THREE.Mesh(new THREE.BoxGeometry(3, 2, 3.4), mats.truckCab);
+
+      t.position.set(0, 1.3, -3.4), t.castShadow = !0, e.add(t);
+
+      const o = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 1.2), new THREE.MeshStandardMaterial({
+
+        color: 7838139,
+
+        metalness: .95,
+
+        roughness: .05,
+
+        transparent: !0,
+
+        opacity: .6
+
+      }));
+
+      o.position.set(0, 1.65, -1.8), o.rotation.x = .25, e.add(o);
+
+      const a = new THREE.Mesh(new THREE.BoxGeometry(3.2, 2.6, 6.5), mats.truckBody);
+
+      a.position.set(0, 1.5, 2.8), a.castShadow = !0, e.add(a);
+
+      const s = mats.truckDanger;
+
+      for (let t = 0; t < 4; t++) {
+
+        const o = new THREE.Mesh(new THREE.BoxGeometry(3.22, .25, 6.52), s);
+
+        o.position.set(0, .6 + .65 * t, 2.8), o.renderOrder = 1, e.add(o)
+
+      }
+
+      const n = new THREE.CylinderGeometry(.55, .55, .6, 16),
+
+        r = new THREE.MeshStandardMaterial({
+
+          color: 526348,
+
+          metalness: .7,
+
+          roughness: .4
+
+        });
+
+      [
+
+        [-1.4, .55, -2.3],
+
+        [1.4, .55, -2.3],
+
+        [-1.4, .55, -.7],
+
+        [1.4, .55, -.7],
+
+        [-1.4, .55, 2.6],
+
+        [1.4, .55, 2.6],
+
+        [-1.4, .55, 4.2],
+
+        [1.4, .55, 4.2]
+
+      ].forEach(t => {
+
+        const o = new THREE.Mesh(n, r);
+
+        o.rotation.z = Math.PI / 2, o.position.set(...t), o.castShadow = !0, e.add(o)
+
+      });
+
+      const i = new THREE.Mesh(new THREE.BoxGeometry(.6, .4, .2), new THREE.MeshStandardMaterial({
+
+        emissive: 16755251,
+
+        emissiveIntensity: 5,
+
+        toneMapped: !1
+
+      }));
+
+      i.position.set(-.9, .9, -5), e.add(i);
+
+      const c = i.clone();
+
+      c.position.x = .9, e.add(c);
+
+      const d = new THREE.ConeGeometry(12, 60, 8, 1, !0),
+
+        l = new THREE.MeshBasicMaterial({
+
+          color: 16768392,
+
+          transparent: !0,
+
+          opacity: .12,
+
+          side: THREE.DoubleSide
+
+        }),
+
+        m = new THREE.Mesh(d, l);
+
+      m.position.set(-.9, 1, -5.1), m.rotation.x = Math.PI, e.add(m);
+
+      const p = m.clone();
+
+      p.position.x = .9, e.add(p);
+
+      const h = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.4, .3), new THREE.MeshStandardMaterial({
+
+        color: 1118488,
+
+        metalness: .9,
+
+        roughness: .2
+
+      }));
+
+      return h.position.set(0, 1.2, -4.9), e.add(h), {
+
+        group: e,
+
+        speed: 0,
+
+        active: !1,
+
+        state: "PATROL",
+
+        targetZ: 0,
+
+        beamL: m,
+
+        beamR: p
+
+      }
+
+    }
+
+const _CORN_GEO = new THREE.ConeGeometry(0.2, 1.0, 3);
+
+const _CORN_MAT = new THREE.MeshLambertMaterial({ color: 0x5a8a30 });
+
+const _CORN_GROUND_GEO = new THREE.PlaneGeometry(26, 100);
+
+const _CORN_GROUND_MAT = new THREE.MeshLambertMaterial({ color: 0x3b5e22 });
+
+
+
+    class HighwayManager {
+
+      constructor() {
+
+        this.segments = [], this.buildings = [], this.streetLights = [], this.lastZ = -200, this.isCity = !1, this.cityStart = 0, this.cityLength = 0, this.emileBillboards = [];
+
+        for (let e = 0; e < CONFIG.viewDistance + 8; e++) this.addSegment()
+
+      }
+
+      addSegment() {
+
+        const e = this.lastZ,
+
+          t = CONFIG.segmentLength;
+
+        this.isCity = !1, Math.random() < CONFIG.cityChance && !this.isCity && (this.isCity = !0, this.cityLength = 12 * t, this.cityStart = e), this.isCity && e < this.cityStart - this.cityLength && (this.isCity = !1);
+
+        const o = new THREE.Group;
+
+        o.rotation.y = 0;
+
+        const a = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.roadWidth, t), mats.road);
+
+        if (a.rotation.x = -Math.PI / 2, a.receiveShadow = !0, o.add(a), this.isCity) {
+
+          const e = new THREE.MeshStandardMaterial({
+
+              color: 3359829,
+
+              metalness: .6
+
+            }),
+
+            a = new THREE.BoxGeometry(.4, 1.2, t),
+
+            s = new THREE.Mesh(a, e);
+
+          s.position.set(-CONFIG.roadWidth / 2 - .2, .6, 0), s.castShadow = !0, o.add(s);
+
+          const n = s.clone();
+
+          n.position.x = CONFIG.roadWidth / 2 + .2, o.add(n)
+
+        }
+
+        const s = CONFIG.roadWidth / CONFIG.laneCount;
+
+        for (let e = 1; e < CONFIG.laneCount; e++) {
+
+          const a = new THREE.Mesh(new THREE.PlaneGeometry(.35, .85 * t), mats.roadMarkings);
+
+          a.rotation.x = -Math.PI / 2, a.position.set(-CONFIG.roadWidth / 2 + e * s, .03, 0), a.renderOrder = 2, o.add(a)
+
+        }
+
+        const n = new THREE.Mesh(new THREE.PlaneGeometry(.5, t), mats.roadMarkings);
+
+        n.rotation.x = -Math.PI / 2, n.position.set(-CONFIG.roadWidth / 2 + .25, .03, 0), o.add(n);
+
+        const r = n.clone();
+
+        r.position.x = CONFIG.roadWidth - .25, o.add(r), o.position.set(0, 0, e), scene.add(o), this.segments.push({
+
+          group: o,
+
+          z: e,
+
+          angle: 0,
+
+          length: t
+
+        }), this.isCity ? this.addCityBlock(e, t) : Math.random() > .7 && this.addRuralDetail(e, t), Math.random() < 0.03 && this.addEmileBillboard(e), this.lastZ -= t
+
+      }
+
+      addEmileBillboard(z) {
+
+        const billboardGroup = new THREE.Group;
+
+        const signFrame = new THREE.Mesh(new THREE.BoxGeometry(12, 6, 0.3), new THREE.MeshStandardMaterial({
+
+          color: 0x222222,
+
+          metalness: 0.8,
+
+          roughness: 0.3
+
+        }));
+
+        signFrame.position.set(CONFIG.roadWidth / 2 + 20, 5, z);
+
+        billboardGroup.add(signFrame);
+
+        const signFace = new THREE.Mesh(new THREE.PlaneGeometry(11, 5), mats.billboardMaterial);
+
+        signFace.position.set(CONFIG.roadWidth / 2 + 20.2, 5, z);
+
+        signFace.rotation.y = -Math.PI / 6;
+
+        billboardGroup.add(signFace);
+
+        const textCanvas = document.createElement('canvas');
+
+        textCanvas.width = 1024;
+
+        textCanvas.height = 512;
+
+        const ctx = textCanvas.getContext('2d');
+
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+
+        ctx.fillRect(0, 0, 1024, 512);
+
+        ctx.font = 'bold 48px Arial';
+
+        ctx.fillStyle = '#ffd700';
+
+        ctx.textAlign = 'center';
+
+        ctx.textBaseline = 'middle';
+
+        ctx.shadowColor = 'rgba(255,215,0,0.9)';
+
+        ctx.shadowBlur = 20;
+
+        ctx.fillText('✨ Thanks to Emile ✨', 512, 180);
+
+        ctx.font = 'bold 36px Arial';
+
+        ctx.fillText('for spotting bugs', 512, 260);
+
+        ctx.font = 'italic 24px Arial';
+
+        ctx.fillStyle = '#00ffd5';
+
+        ctx.fillText('Mr. Truck\'s Revenge', 512, 340);
+
+        const textTexture = new THREE.CanvasTexture(textCanvas);
+
+        textTexture.needsUpdate = true;
+
+        const textMaterial = new THREE.MeshBasicMaterial({
+
+          map: textTexture,
+
+          transparent: true,
+
+          side: THREE.DoubleSide
+
+        });
+
+        const textMesh = new THREE.Mesh(new THREE.PlaneGeometry(10.5, 4.8), textMaterial);
+
+        textMesh.position.set(CONFIG.roadWidth / 2 + 20.21, 5, z);
+
+        textMesh.rotation.y = -Math.PI / 6;
+
+        billboardGroup.add(textMesh);
+
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 10, 8), new THREE.MeshStandardMaterial({
+
+          color: 0x333333,
+
+          metalness: 0.7
+
+        }));
+
+        post.position.set(CONFIG.roadWidth / 2 + 20, 2.5, z);
+
+        billboardGroup.add(post);
+
+        const light = new THREE.PointLight(0xffd700, 1.5, 30, 2);
+
+        light.position.set(CONFIG.roadWidth / 2 + 20, 8, z - 2);
+
+        billboardGroup.add(light);
+
+        scene.add(billboardGroup);
+
+        this.emileBillboards.push(billboardGroup);
+
+        mats.billboardMaterial.uniforms.time.value = Date.now() * 0.001
+
+      }
+
+      addRuralDetail(e, t) {
+
+        const o = Math.floor(3 * Math.random()) + 2;
+
+        for (let a = 0; a < o; a++) {
+
+          const o = Math.random() > .5 ? 1 : -1,
+
+            a = new THREE.Mesh(new THREE.CylinderGeometry(.15, .15, 1.5, 6), new THREE.MeshStandardMaterial({
+
+              color: 4863784
+
+            }));
+
+          a.position.set(o * (CONFIG.roadWidth / 2 + 3), .75, e - t + Math.random() * t), a.castShadow = !0, scene.add(a), this.buildings.push(a)
+
+        }
+
+      }
+
+    // 🌽 CORN FALLBACK METHOD
+
+    addCityBlock(e, t) {
+
+        // 🚨 EMERGENCY CORN FALLBACK
+
+        if (window.EMERGENCY_CORN_ACTIVE) {
+
+            const side = Math.random() > 0.5 ? 1 : -1;
+
+            const group = new THREE.Group();
+
+            
+
+            // Ground patch
+
+            const g = new THREE.Mesh(_CORN_GROUND_GEO, _CORN_GROUND_MAT);
+
+            g.rotation.x = -Math.PI / 2;
+
+            g.position.set(0, 0.01, -t / 2);
+
+            group.add(g);
+
+
+
+            // Low-poly stalks (15 max per segment)
+
+            for (let i = 0; i < 15; i++) {
+
+                const m = new THREE.Mesh(_CORN_GEO, _CORN_MAT);
+
+                m.position.set((Math.random() - 0.5) * 24, 0.5, -Math.random() * t);
+
+                m.rotation.y = Math.random() * 6.28;
+
+                m.scale.set(0.7 + Math.random()*0.6, 0.4 + Math.random()*0.8, 0.7 + Math.random()*0.6);
+
+                group.add(m);
+
+            }
+
+            group.position.set(side * (CONFIG.roadWidth / 2 + 10), 0, e);
+
+            scene.add(group);
+
+            this.buildings.push(group);
+
+            return; // Skip heavy building generation
+
+        }
+
+
+
+        // 🏙️ ORIGINAL HEAVY BUILDING GENERATION
+
+        const o = Math.floor(5 * Math.random()) + 3;
+
+        for (let a = 0; a < o; a++) {
+
+            const o = Math.random() > .5 ? 1 : -1,
+
+            a = CONFIG.roadWidth / 2 + 12 + 40 * Math.random(),
+
+            s = this.generateProceduralBuilding(o, a, e, t);
+
+            scene.add(s), this.buildings.push(s)
+
+        }
+
+        for (let o = 0; o < 2; o++) {
+
+            const a = new THREE.Group,
+
+            s = new THREE.Mesh(new THREE.CylinderGeometry(.12, .15, 8, 8), new THREE.MeshStandardMaterial({
+
+                color: 2236968, metalness: .7
+
+            }));
+
+            s.position.y = 4, a.add(s);
+
+            const n = new THREE.Mesh(new THREE.SphereGeometry(.4, 12, 12), new THREE.MeshStandardMaterial({
+
+                emissive: 16772812, emissiveIntensity: 3, toneMapped: !1
+
+            }));
+
+            n.position.set(0, 7.8, 0), a.add(n);
+
+            const r = new THREE.Mesh(new THREE.ConeGeometry(6, 15, 8, 1, !0), new THREE.MeshBasicMaterial({
+
+                color: 16772812, transparent: !0, opacity: .06, side: THREE.DoubleSide
+
+            }));
+
+            r.position.set(0, 7, 0), r.rotation.x = Math.PI, a.add(r);
+
+            const i = 0 === o ? 1 : -1;
+
+            a.position.set(i * (CONFIG.roadWidth / 2 + 4), 0, e - t + Math.random() * t), scene.add(a), this.streetLights.push(a), this.buildings.push(a)
+
+        }
+
+    }
+
+      generateProceduralBuilding(e, t, o, a) {
+
+        const s = new THREE.Group,
+
+          n = () => Math.random(),
+
+          r = Math.floor(8 * n()),
+
+          i = 10 + 70 * n(),
+
+          c = 7 + 16 * n(),
+
+          d = 7 + 16 * n(),
+
+          l = [{
+
+            base: 1711918,
+
+            accent: 2767434,
+
+            winLit: 8965375,
+
+            winDark: 1120290,
+
+            door: 2763317
+
+          }, {
+
+            base: 2760479,
+
+            accent: 3811882,
+
+            winLit: 16764040,
+
+            winDark: 1708560,
+
+            door: 3810592
+
+          }, {
+
+            base: 2042414,
+
+            accent: 2767418,
+
+            winLit: 13434794,
+
+            winDark: 1055256,
+
+            door: 2437162
+
+          }, {
+
+            base: 2434352,
+
+            accent: 3487040,
+
+            winLit: 16746700,
+
+            winDark: 1577498,
+
+            door: 3155253
+
+          }, {
+
+            base: 1382432,
+
+            accent: 2106672,
+
+            winLit: 11197951,
+
+            winDark: 658965,
+
+            door: 1712170
+
+          }, {
+
+            base: 2958367,
+
+            accent: 4011055,
+
+            winLit: 16768426,
+
+            winDark: 1709328,
+
+            door: 3484192
+
+          }],
+
+          m = l[Math.floor(n() * l.length)],
+
+          p = new THREE.MeshStandardMaterial({
+
+            color: m.base,
+
+            roughness: .3 + .6 * n(),
+
+            metalness: .1 + .3 * n()
+
+          }),
+
+          h = new THREE.MeshStandardMaterial({
+
+            color: m.accent,
+
+            roughness: .5,
+
+            metalness: .2
+
+          }),
+
+          E = new THREE.MeshStandardMaterial({
+
+            color: m.winLit,
+
+            emissive: m.winLit,
+
+            emissiveIntensity: .4 + 1.6 * n(),
+
+            transparent: !0,
+
+            opacity: .65 + .3 * n()
+
+          }),
+
+          u = new THREE.MeshStandardMaterial({
+
+            color: m.winDark,
+
+            roughness: .8,
+
+            metalness: .4,
+
+            transparent: !0,
+
+            opacity: .55
+
+          }),
+
+          y = new THREE.MeshStandardMaterial({
+
+            color: 8956620,
+
+            metalness: .9,
+
+            roughness: .05,
+
+            transparent: !0,
+
+            opacity: .35
+
+          }),
+
+          g = new THREE.MeshStandardMaterial({
+
+            color: 3355448,
+
+            roughness: .9
+
+          }),
+
+          M = new THREE.MeshStandardMaterial({
+
+            color: 4473930,
+
+            roughness: .4,
+
+            metalness: .7
+
+          }),
+
+          w = (e, t, o, a, n, r, i = p) => {
+
+            const c = new THREE.Mesh(new THREE.BoxGeometry(e, t, o), i);
+
+            return c.position.set(a, n, r), c.castShadow = !0, s.add(c), c
+
+          };
+
+        if (0 === r) w(c, i, d, 0, i / 2, 0);
+
+        else if (1 === r) {
+
+          const e = .6 * i,
+
+            t = .4 * i;
+
+          w(c, e, d, 0, e / 2, 0), w(.7 * c, t, .7 * d, 0, e + t / 2, 0)
+
+        } else if (2 === r) {
+
+          const e = .3 * c;
+
+          w(.4 * c, i, .8 * d, -e / 2, i / 2, 0), w(.4 * c, .85 * i, .8 * d, e / 2, .85 * i / 2, 0), w(e + .4 * c, .1 * i, .6 * d, 0, .6 * i, 0, h)
+
+        } else if (3 === r) {
+
+          const e = 8 + 6 * n();
+
+          w(c, e, d, 0, e / 2, 0), w(c + 2, .2, 3, 0, .3 * e, d / 2 + 1.5, new THREE.MeshStandardMaterial({
+
+            color: 13382451,
+
+            roughness: .8
+
+          }))
+
+        } else if (4 === r) {
+
+          const e = new THREE.Mesh(new THREE.CylinderGeometry(c / 2, c / 2.2, i, 12), p);
+
+          e.position.y = i / 2, e.castShadow = !0, s.add(e)
+
+        } else if (5 === r) w(c, i, .5 * d, 0, i / 2, .25 * -d), w(.5 * c, .6 * i, .5 * d, .25 * -c, .3 * i, .25 * d);
+
+        else if (6 === r) w(c, .7 * i, d, 0, .35 * i, 0), w(.6 * c, .3 * i, .6 * d, .2 * c, .85 * i, 0, h);
+
+        else {
+
+          const e = 3 + Math.floor(3 * n());
+
+          for (let t = 0; t < e; t++) {
+
+            const o = i / e;
+
+            w(c * (1 - .2 * t), o, d * (1 - .2 * t), 0, t * o + o / 2, 0, t % 2 == 0 ? p : h)
+
+          }
+
+        }
+
+        const T = Math.floor(5 * n()),
+
+          R = new THREE.MeshStandardMaterial({
+
+            color: 1118485,
+
+            roughness: .7
+
+          }),
+
+          f = (e, t, o, a = 0) => {
+
+            const r = n() > .4 ? E : u,
+
+              i = .8 + .4 * n(),
+
+              c = new THREE.Mesh(new THREE.PlaneGeometry(1.6 * i, 2 * i), r);
+
+            if (c.position.set(e, t, o), c.rotation.y = a, s.add(c), n() > .3) {
+
+              const e = new THREE.Mesh(new THREE.BoxGeometry(1.8 * i, 2.2 * i, .08), R);
+
+              e.position.copy(c.position), e.rotation.y = a, e.position.z += 0 === a ? .04 : -.04, s.add(e)
+
+            }
+
+          };
+
+        if (0 === T) {
+
+          const e = Math.floor(i / 3.5),
+
+            t = Math.floor(c / 2.8);
+
+          for (let o = 0; o < e; o++)
+
+            for (let e = 0; e < t; e++) n() > .2 && (f(-c / 2 + 1.5 + 2.8 * e, 2 + 3.5 * o, d / 2 + .08), f(-c / 2 + 1.5 + 2.8 * e, 2 + 3.5 * o, -d / 2 - .08, Math.PI))
+
+        } else if (1 === T) {
+
+          const e = Math.floor(i / 4);
+
+          for (let t = 0; t < e; t++)
+
+            if (n() > .25) {
+
+              const e = new THREE.Mesh(new THREE.PlaneGeometry(c - 1, 1.4), n() > .5 ? E : u);
+
+              e.position.set(0, 2.5 + 4 * t, d / 2 + .08), s.add(e);
+
+              const o = e.clone();
+
+              o.position.z = -d / 2 - .08, o.rotation.y = Math.PI, s.add(o)
+
+            }
+
+        } else if (2 === T) {
+
+          const e = Math.floor(c / 3);
+
+          for (let t = 0; t < e; t++)
+
+            if (n() > .35) {
+
+              const e = new THREE.Mesh(new THREE.PlaneGeometry(1.4, i - 2), n() > .5 ? E : u);
+
+              e.position.set(-c / 2 + 1.5 + 3 * t, i / 2, d / 2 + .08), s.add(e);
+
+              const o = e.clone();
+
+              o.position.z = -d / 2 - .08, o.rotation.y = Math.PI, s.add(o)
+
+            }
+
+        } else if (3 === T) {
+
+          const e = Math.floor(c * i / 12);
+
+          for (let t = 0; t < e; t++) n() > .25 && (f((n() - .5) * (c - 2), 2 + n() * (i - 4), d / 2 + .08), f((n() - .5) * (c - 2), 2 + n() * (i - 4), -d / 2 - .08, Math.PI))
+
+        }
+
+        const H = Math.floor(4 * n()),
+
+          v = (n() - .5) * c * .4,
+
+          S = d / 2 + .1,
+
+          x = new THREE.Mesh(new THREE.BoxGeometry(3, .3, 1.5), g);
+
+        if (x.position.set(v, .15, S + .5), s.add(x), 0 === H) {
+
+          const e = new THREE.Mesh(new THREE.BoxGeometry(2.2, 3.2, .15), y);
+
+          e.position.set(v, 1.6, S), s.add(e);
+
+          const t = new THREE.Mesh(new THREE.BoxGeometry(3.5, .15, 2), M);
+
+          t.position.set(v, 3.4, S + .8), s.add(t)
+
+        } else if (1 === H) {
+
+          const e = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.8, .15), new THREE.MeshStandardMaterial({
+
+            color: 2763306,
+
+            roughness: .6,
+
+            metalness: .5
+
+          }));
+
+          e.position.set(v, 1.4, S), s.add(e);
+
+          const t = new THREE.Mesh(new THREE.BoxGeometry(1.6, .1, .1), M);
+
+          t.position.set(v, 1.2, S + .1), s.add(t)
+
+        } else if (2 === H) {
+
+          const e = new THREE.Mesh(new THREE.BoxGeometry(3.5, 3.5, .2), new THREE.MeshStandardMaterial({
+
+            color: 3815994,
+
+            roughness: .8
+
+          }));
+
+          e.position.set(v, 1.75, S), s.add(e);
+
+          const t = new THREE.Mesh(new THREE.BoxGeometry(3.5, .1, .05), new THREE.MeshStandardMaterial({
+
+            color: 16755200,
+
+            emissive: 16755200,
+
+            emissiveIntensity: .5
+
+          }));
+
+          t.position.set(v, .05, S + .15), s.add(t)
+
+        } else {
+
+          const e = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 3, 8), y);
+
+          e.position.set(v, 1.5, S), s.add(e);
+
+          const t = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, .2, 8), M);
+
+          t.position.set(v, 3.1, S), s.add(t)
+
+        }
+
+        if (n() > .4) {
+
+          const e = new THREE.MeshStandardMaterial({
+
+              color: 10075101,
+
+              metalness: .8,
+
+              roughness: .1,
+
+              transparent: !0,
+
+              opacity: .5
+
+            }),
+
+            t = new THREE.Mesh(new THREE.PlaneGeometry(2, 2.5), e);
+
+          t.position.set(v - 2, 1.5, S + .05), s.add(t);
+
+          const o = t.clone();
+
+          o.position.x = v + 2, s.add(o)
+
+        }
+
+        if (n() > .5 && i > 15) {
+
+          const e = new THREE.MeshStandardMaterial({
+
+              color: 2236962,
+
+              roughness: .8,
+
+              metalness: .6
+
+            }),
+
+            t = Math.floor(i / 4);
+
+          for (let o = 0; o < t; o++) {
+
+            const a = new THREE.Mesh(new THREE.BoxGeometry(2.5, .15, 1.2), e);
+
+            a.position.set(c / 2 + .6, 3 + 4 * o, d / 2 + .6), s.add(a);
+
+            const n = new THREE.Mesh(new THREE.BoxGeometry(2.5, .8, .05), e);
+
+            if (n.position.set(c / 2 + .6, 3.4 + 4 * o, d / 2 + 1.1), s.add(n), o < t - 1) {
+
+              const t = new THREE.Mesh(new THREE.BoxGeometry(.6, 3.8, .05), e);
+
+              t.position.set(c / 2 + 1.5, 3 + 4 * o + 1.9, d / 2 + 1.1), s.add(t)
+
+            }
+
+          }
+
+        }
+
+        if (n() > .6) {
+
+          const e = 1 + Math.floor(3 * n());
+
+          for (let t = 0; t < e; t++) {
+
+            const e = new THREE.Mesh(new THREE.BoxGeometry(1.2, .8, .6), new THREE.MeshStandardMaterial({
+
+              color: 4473924,
+
+              roughness: .7
+
+            }));
+
+            e.position.set((n() - .5) * c * .6, 4 + n() * (i - 6), d / 2 + .4), s.add(e)
+
+          }
+
+        }
+
+        if (n() > .7) {
+
+          const e = new THREE.MeshStandardMaterial({
+
+              color: 3355443,
+
+              roughness: .6,
+
+              metalness: .3
+
+            }),
+
+            t = new THREE.Mesh(new THREE.CylinderGeometry(.12, .12, i, 6), e);
+
+          t.position.set(-c / 2 - .2, i / 2, d / 2 + .2), s.add(t)
+
+        }
+
+        if (n() > .65) {
+
+          const e = [16724838, 3407820, 16763955, 6697983, 3394815],
+
+            t = e[Math.floor(n() * e.length)],
+
+            o = new THREE.MeshStandardMaterial({
+
+              color: t,
+
+              emissive: t,
+
+              emissiveIntensity: .3,
+
+              roughness: .9
+
+            }),
+
+            a = new THREE.Mesh(new THREE.PlaneGeometry(1.5 + 2 * n(), 1 + 1.5 * n()), o);
+
+          a.position.set((n() - .5) * c * .5, 1.5 + 3 * n(), d / 2 + .1), s.add(a)
+
+        }
+
+        if (n() > .5) {
+
+          const e = new THREE.Mesh(new THREE.BoxGeometry(2, .8, .8), new THREE.MeshStandardMaterial({
+
+            color: 5917242,
+
+            roughness: .9
+
+          }));
+
+          e.position.set(v + (n() > .5 ? 2 : -2), .4, d / 2 + 1.2), s.add(e);
+
+          const t = new THREE.Mesh(new THREE.SphereGeometry(.6, 8, 6), new THREE.MeshStandardMaterial({
+
+            color: 2775594,
+
+            roughness: .8
+
+          }));
+
+          t.position.copy(e.position), t.position.y += .9, s.add(t)
+
+        }
+
+        const G = Math.floor(6 * n()),
+
+          I = i + .1;
+
+        if (0 === G) {
+
+          const e = new THREE.Mesh(new THREE.CylinderGeometry(.08, .12, 6, 6), M);
+
+          e.position.y = I + 3, s.add(e);
+
+          const t = new THREE.Mesh(new THREE.SphereGeometry(.2, 8, 8), new THREE.MeshStandardMaterial({
+
+            emissive: 16711680,
+
+            emissiveIntensity: 3
+
+          }));
+
+          t.position.y = I + 6, s.add(t)
+
+        } else if (1 === G)
+
+          for (let e = 0; e < 3; e++) {
+
+            const e = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.1, 1.4), new THREE.MeshStandardMaterial({
+
+              color: 5592405,
+
+              roughness: .8
+
+            }));
+
+            e.position.set((n() - .5) * c * .5, I + .55, (n() - .5) * d * .5), s.add(e)
+
+          } else if (2 === G) {
+
+            const e = new THREE.MeshStandardMaterial({
+
+              color: 3355443
+
+            });
+
+            [
+
+              [-1, -1],
+
+              [1, -1],
+
+              [-1, 1],
+
+              [1, 1]
+
+            ].forEach(([t, o]) => {
+
+              const a = new THREE.Mesh(new THREE.CylinderGeometry(.08, .08, 3, 4), e);
+
+              a.position.set(t, I + 1.5, o), s.add(a)
+
+            });
+
+            const t = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 2, 8), new THREE.MeshStandardMaterial({
+
+              color: 2767434,
+
+              roughness: .7
+
+            }));
+
+            t.position.y = I + 3.5, s.add(t)
+
+          } else if (3 === G) {
+
+          const e = new THREE.Mesh(new THREE.ConeGeometry(Math.max(c, d) / 1.8, 4, 4), new THREE.MeshStandardMaterial({
+
+            color: 1710629,
+
+            roughness: .8
+
+          }));
+
+          e.position.y = I + 2, e.rotation.y = Math.PI / 4, s.add(e)
+
+        } else if (4 === G) {
+
+          const e = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, .1, 16), new THREE.MeshStandardMaterial({
+
+            color: 2236962,
+
+            roughness: .9
+
+          }));
+
+          e.position.y = I + .05, s.add(e);
+
+          const t = new THREE.Mesh(new THREE.RingGeometry(1.5, 1.8, 16), new THREE.MeshStandardMaterial({
+
+            color: 16755200,
+
+            emissive: 16755200,
+
+            emissiveIntensity: .5
+
+          }));
+
+          t.rotation.x = -Math.PI / 2, t.position.y = I + .12, s.add(t)
+
+        } else {
+
+          const e = new THREE.Mesh(new THREE.BoxGeometry(.6 * c, .1, .6 * d), new THREE.MeshStandardMaterial({
+
+            color: 3815994,
+
+            roughness: .8
+
+          }));
+
+          e.position.y = I + .05, s.add(e);
+
+          for (let e = 0; e < 4; e++) {
+
+            const e = new THREE.Mesh(new THREE.CylinderGeometry(.4, .3, .8, 6), new THREE.MeshStandardMaterial({
+
+              color: 5917242
+
+            }));
+
+            e.position.set((n() - .5) * c * .4, I + .4, (n() - .5) * d * .4), s.add(e);
+
+            const t = new THREE.Mesh(new THREE.SphereGeometry(.5, 6, 5), new THREE.MeshStandardMaterial({
+
+              color: 2775594,
+
+              roughness: .8
+
+            }));
+
+            t.position.copy(e.position), t.position.y += .6, s.add(t)
+
+          }
+
+        }
+
+        if (n() > .4) {
+
+          const e = new THREE.Mesh(new THREE.ConeGeometry(.6, .3, 8), M);
+
+          e.rotation.x = Math.PI / 2 + .3 * n(), e.position.set((n() - .5) * c * .3, I + 1.5, (n() - .5) * d * .3), s.add(e);
+
+          const t = new THREE.Mesh(new THREE.CylinderGeometry(.04, .04, .8, 4), M);
+
+          t.position.copy(e.position), t.position.y -= .4, s.add(t)
+
+        }
+
+        if (n() > .5)
+
+          for (let e = 0; e < 2; e++) {
+
+            const e = new THREE.Mesh(new THREE.CylinderGeometry(.15, .15, 1.2 + n(), 6), new THREE.MeshStandardMaterial({
+
+              color: 4473924
+
+            }));
+
+            e.position.set((n() - .5) * c * .4, I + .6 + .5 * n(), (n() - .5) * d * .4), s.add(e)
+
+          }
+
+        const C = (e, t, o, a = 1) => {
+
+            const s = new THREE.Group,
+
+              r = (new THREE.Color).setHSL(n(), .3 + .3 * n(), .2 + .2 * n()),
+
+              i = new THREE.Mesh(new THREE.CapsuleGeometry(.25 * a, .9 * a, 4, 8), new THREE.MeshStandardMaterial({
+
+                color: r,
+
+                roughness: .8
+
+              }));
+
+            i.position.y = .7 * a, s.add(i);
+
+            const c = new THREE.Mesh(new THREE.SphereGeometry(.18 * a, 8, 6), new THREE.MeshStandardMaterial({
+
+              color: 13935988,
+
+              roughness: .7
+
+            }));
+
+            return c.position.y = 1.35 * a, s.add(c), s.position.set(e, t, o), s.rotation.y = n() * Math.PI * 2, s
+
+          },
+
+          P = 2 + Math.floor(4 * n());
+
+        for (let e = 0; e < P; e++) {
+
+          const e = v + 6 * (n() - .5),
+
+            t = d / 2 + 1.5 + 2 * n();
+
+          s.add(C(e, 0, t, .9 + .2 * n()))
+
+        }
+
+        if (n() > .7 && i > 12) {
+
+          const e = 4 + Math.floor(n() * (i - 6)),
+
+            t = (n() - .5) * c * .6;
+
+          s.add(C(t, e, d / 2 + .5, .8))
+
+        }
+
+        return s.position.set(e * t, 0, o - a + n() * a), s.rotation.y = .4 * (n() - .5), s
+
+      }
+
+      update(e) {
+
+        for (; this.segments.length > 0 && this.segments[0].z > e + 2 * CONFIG.segmentLength;) {
+
+          const e = this.segments.shift();
+
+          e.group && (e.group.traverse(e => {
+
+            if (e.geometry && e.geometry.dispose(), e.material) {
+
+              (Array.isArray(e.material) ? e.material : [e.material]).forEach(e => {
+
+                e.map && e.map.dispose(), e.dispose()
+
+              })
+
+            }
+
+          }), scene.remove(e.group))
+
+        }
+
+        for (; this.segments.length < CONFIG.viewDistance + 8;) this.addSegment();
+
+        const t = .001 * Date.now();
+
+        this.streetLights.forEach((e, o) => {
+
+          const a = e.children[1];
+
+          if (a && a.material?.emissive) {
+
+            const e = .7 + .3 * Math.sin(3 * t + .5 * o);
+
+            a.material.emissiveIntensity = 3 * e
+
+          }
+
+        });
+
+        this.emileBillboards.forEach(b => {
+
+          if (b.children[1] && b.children[1].material?.uniforms?.time) {
+
+            b.children[1].material.uniforms.time.value = t
+
+          }
+
+        })
+
+      }
+
+      dispose() {
+
+        this.segments.forEach(e => {
+
+          e.group && (e.group.traverse(e => {
+
+            if (e.geometry && e.geometry.dispose(), e.material) {
+
+              (Array.isArray(e.material) ? e.material : [e.material]).forEach(e => {
+
+                e.map && e.map.dispose(), e.dispose()
+
+              })
+
+            }
+
+          }), scene.remove(e.group))
+
+        }), this.buildings.forEach(e => {
+
+          e.traverse(e => {
+
+            if (e.geometry && e.geometry.dispose(), e.material) {
+
+              (Array.isArray(e.material) ? e.material : [e.material]).forEach(e => {
+
+                e.map && e.map.dispose(), e.dispose()
+
+              })
+
+            }
+
+          }), scene.remove(e)
+
+        }), this.emileBillboards.forEach(e => {
+
+          scene.remove(e)
+
+        }), this.segments = [], this.buildings = [], this.streetLights = [], this.emileBillboards = []
+
+      }
+
+    }
+
+
+
+    function startGame() {
+
+cancelPreloader(); // 🚀 HALT PRELOADING, GAME IS ACTIVE
+
+      document.getElementById("menu").style.opacity = "0", setTimeout(() => {
+
+        document.getElementById("menu").style.display = "none"
+
+      }, 500), gameActive = !0, resetStats(), resetPositions(), composer.passes[4] && (composer.passes[4].enabled = !0), camera.position.set(0, 15, 40), camera.rotation.set(0, 0, 0), camera.up.set(0, 1, 0), camera.lookAt(0, 1.2, -25), cameraTarget = {
+
+        x: player.group.position.x,
+
+        y: 14 + .04 * speed,
+
+        z: player.group.position.z + 35 + .08 * speed
+
+      }, resetCameraTarget(), showAchievement("ENGINE IGNITED")
+
+    }
+
+
+
+    function resetGame() {
+
+      document.getElementById("game-over").style.opacity = "0", document.getElementById("game-over").style.pointerEvents = "none", gameActive = !0, camera.position.set(0, 15, 40), camera.lookAt(0, 1.2, -25), resetStats(), resetPositions(), resetCameraTarget(), showAchievement("CHASE RESTARTED")
+
+    }
+
+
+
+    function resetStats() {
+
+      score = 0, lives = 3, speed = 0, damageFlash = 0, lastAchievementScore = 0, updateHUD()
+
+    }
+
+
+
+    function resetPositions() {
+
+      scene.rotation.set(0, 0, 0), player.group.position.set(0, 1, 0), player.group.rotation.set(0, 0, 0), traffic.forEach(e => {
+
+        scene.remove(e.group), e.exhaust && (e.exhaust.dispose(), scene.remove(e.exhaust.points)), e.group.traverse(e => {
+
+          if (e.geometry && e.geometry.dispose(), e.material) {
+
+            (Array.isArray(e.material) ? e.material : [e.material]).forEach(e => {
+
+              e.map && e.map.dispose(), e.dispose()
+
+            })
+
+          }
+
+        })
+
+      }), traffic = [], player.group.position.set(0, 1, 0), player.group.rotation.set(0, 0, 0), player.vx = 0, player.vz = 0, player.z = 0, highwayManager.dispose(), highwayManager = new HighwayManager, spawnTraffic()
+
+    }
+
+
+
+    function spawnTraffic() {
+
+      for (let e = 0; e < CONFIG.trafficCount; e++) {
+
+        const e = Math.floor(Math.random() * CONFIG.laneCount),
+
+          t = CONFIG.roadWidth / CONFIG.laneCount,
+
+          o = (e - CONFIG.laneCount / 2 + .5) * t,
+
+          a = -150 - 1500 * Math.random(),
+
+          s = createTrafficCar(mats.traffic[Math.floor(Math.random() * mats.traffic.length)].color);
+
+        s.group.position.set(o, .5, a), scene.add(s.group), s.exhaust = new ParticleSystem(15, {
+
+          color: 6715272,
+
+          spread: .2,
+
+          offsetY: .25,
+
+          offsetZ: -2.2
+
+        }), scene.add(s.exhaust.points), traffic.push(s)
+
+      }
+
+    }
+
+
+
+    function createTrafficCar(e) {
+
+      const t = new THREE.Group,
+
+        o = new THREE.Mesh(new THREE.BoxGeometry(2.1, .75, 4.2), new THREE.MeshStandardMaterial({
+
+          color: e,
+
+          metalness: .5,
+
+          roughness: .3
+
+        }));
+
+      o.castShadow = !0, o.position.y = .6, t.add(o);
+
+      const a = new THREE.Mesh(new THREE.BoxGeometry(1.8, .65, 2.3), new THREE.MeshStandardMaterial({
+
+        color: 855317,
+
+        metalness: .8,
+
+        roughness: .15
+
+      }));
+
+      a.position.set(0, 1.25, -.4), t.add(a);
+
+      const s = new THREE.CylinderGeometry(.38, .38, .4, 12),
+
+        n = new THREE.MeshStandardMaterial({
+
+          color: 657935
+
+        });
+
+      [
+
+        [-1.05, .38, 1.3],
+
+        [1.05, .38, 1.3],
+
+        [-1.05, .38, -1.3],
+
+        [1.05, .38, -1.3]
+
+      ].forEach(e => {
+
+        const o = new THREE.Mesh(s, n);
+
+        o.rotation.z = Math.PI / 2, o.position.set(...e), t.add(o)
+
+      });
+
+      const r = new THREE.Mesh(new THREE.BoxGeometry(.35, .2, .1), mats.headlight);
+
+      r.position.set(-.55, .65, 2.15), t.add(r);
+
+      const i = r.clone();
+
+      i.position.x = .55, t.add(i);
+
+      const c = new THREE.Mesh(new THREE.BoxGeometry(.35, .2, .1), mats.taillight);
+
+      c.position.set(-.55, .65, -2.15), t.add(c);
+
+      const d = c.clone();
+
+      return d.position.x = .55, t.add(d), {
+
+        group: t,
+
+        speed: 0,
+
+        exhaust: null
+
+      }
+
+    }
+
+// 📦 SETTINGS MANAGER
+
+const SETTINGS_KEY = 'mtr_settings_v1';
+
+const DEFAULT_SETTINGS = { sensitivity: 1.0, skipIntro: false, noAntiLanPrompt: false, defaultQuality: 3 };
+
+let gameSettings = { ...DEFAULT_SETTINGS };
+
+window.activeSensitivity = 1.0; // Exposed for steering patch
+
+
+
+function loadGameSettings() {
+
+  try {
+
+    const s = localStorage.getItem(SETTINGS_KEY);
+
+    if (s) gameSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(s) };
+
+  } catch(e) { console.warn('⚠️ Settings load failed', e); }
+
+  window.activeSensitivity = gameSettings.sensitivity;
+
+  return gameSettings;
+
+}
+
+
+
+function saveGameSettings(newData) {
+
+  gameSettings = { ...gameSettings, ...newData };
+
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(gameSettings));
+
+  window.activeSensitivity = gameSettings.sensitivity;
+
+}
+
+
+
+function applySettingsToUI() {
+
+  document.getElementById('set-sensitivity').value = gameSettings.sensitivity;
+
+  document.getElementById('sens-val').textContent = `${gameSettings.sensitivity.toFixed(1)}x`;
+
+  document.getElementById('set-skip-intro').checked = gameSettings.skipIntro;
+
+  document.getElementById('set-no-anti-lan').checked = gameSettings.noAntiLanPrompt;
+
+  document.getElementById('set-quality').value = gameSettings.defaultQuality;
+
+}
+
+
+
+// 🛠️ INTEGRATION PATCHES (Apply these to existing functions)
+
+
+
+// 1. Inside `init()`, replace `loadUpgrades(), QualityManager.init(), initMenuParticles(), initIntro()` with:
+
+loadGameSettings();
+
+if (gameSettings.skipIntro) {
+
+  document.getElementById('intro-screen').style.display = 'none';
+
+  if (!gameSettings.noAntiLanPrompt && document.getElementById('anti-lan-wizard')) AntiLanWizard.show();
+
+  else showMenuScreen();
+
+} else {
+
+  initIntro();
+
+}
+
+QualityManager.init();
+
+initMenuParticles();
+
+initSettingsUI(); // New call
+
+// Then continue with scene setup...
+
+
+
+// 2. Add this function anywhere in the module:
+
+function initSettingsUI() {
+
+  const panel = document.getElementById('settings-panel');
+
+  const sensSlider = document.getElementById('set-sensitivity');
+
+  const sensVal = document.getElementById('sens-val');
+
+
+
+  sensSlider.addEventListener('input', () => {
+
+    window.activeSensitivity = parseFloat(sensSlider.value);
+
+    sensVal.textContent = `${window.activeSensitivity.toFixed(1)}x`;
+
+  });
+
+
+
+  document.getElementById('btn-settings').onclick = () => {
+
+    applySettingsToUI();
+
+    panel.style.display = 'flex';
+
+    setTimeout(() => panel.classList.add('active'), 10);
+
+  };
+
+
+
+  const closePanel = () => {
+
+    panel.classList.remove('active');
+
+    setTimeout(() => panel.style.display = 'none', 300);
+
+  };
+
+
+
+  document.getElementById('btn-close-settings').onclick = () => {
+
+    loadGameSettings(); applySettingsToUI(); window.activeSensitivity = gameSettings.sensitivity;
+
+    closePanel();
+
+  };
+
+
+
+  document.getElementById('btn-apply-settings').onclick = () => {
+
+    saveGameSettings({
+
+      sensitivity: parseFloat(document.getElementById('set-sensitivity').value),
+
+      skipIntro: document.getElementById('set-skip-intro').checked,
+
+      noAntiLanPrompt: document.getElementById('set-no-anti-lan').checked,
+
+      defaultQuality: parseInt(document.getElementById('set-quality').value)
+
+    });
+
+    if (window.QualityManager) QualityManager.setTier(gameSettings.defaultQuality);
+
+    showAchievement('⚙️ SETTINGS SAVED');
+
+    closePanel();
+
+  };
+
+}
+
+    function updatePlayer(e) {
+
+      const t = UPGRADES.v8.claimed ? UPGRADES.v8.effect : {
+
+          accelMult: 1,
+
+          maxSpeedBonus: 0
+
+        },
+
+        o = UPGRADES.tires.claimed ? UPGRADES.tires.effect : {
+
+          handlingMult: 1,
+
+          driftReduction: 0
+
+        },
+
+        a = 140 + t.maxSpeedBonus,
+
+        s = 50 * t.accelMult,
+
+        n = 40 * o.handlingMult,
+
+        r = UPGRADES.nitro.claimed ? UPGRADES.nitro.effect : {
+
+          nitroMult: 1,
+
+          rechargeMult: 1
+
+        },
+
+        i = keys.Space ? 2.2 * r.nitroMult : 1;
+
+      keys.ArrowUp || keys.KeyW ? speed += s * e * i : speed -= 25 * e, speed = Math.max(0, Math.min(a, speed));
+
+      let c = 0;
+
+      (keys.ArrowLeft || keys.KeyA) && (c = -1), (keys.ArrowRight || keys.KeyD) && (c = 1), player.z -= speed * e * 2.2, player.group.position.z = player.z, player.vx += c * n * e * (window.activeSensitivity || 1), player.vx *= .88 - o.driftReduction, player.group.position.x += player.vx * e, Math.abs(player.vx) < .005 && (player.vx = 0, 0 === c && Math.abs(player.group.position.x) < .05 && (player.group.position.x = 0));
+
+      const d = CONFIG.roadWidth / 2 - 2;
+
+      Math.abs(player.group.position.x) > d && (player.group.position.x = Math.sign(player.group.position.x) * d, player.vx *= -.4), player.group.rotation.z = .015 * -player.vx, player.group.rotation.y = .008 * player.vx, player.nitroGlow && keys.Space && UPGRADES.nitro.claimed ? (player.nitroGlow.visible = !0, player.nitroGlow.scale.y = 1 + .3 * Math.sin(.02 * Date.now())) : player.nitroGlow && (player.nitroGlow.visible = !1);
+
+      const l = new THREE.Vector3(0, .4, -2.6);
+
+      player.exhaustLeft.update(e, player.group.localToWorld(l.clone().set(-.6, .4, -2.6)), speed), player.exhaustRight.update(e, player.group.localToWorld(l.clone().set(.6, .4, -2.6)), speed), traffic.forEach(t => {
+
+        if (t.exhaust) {
+
+          const o = new THREE.Vector3(0, .35, -2.1);
+
+          t.exhaust.update(e, t.group.localToWorld(o), 30)
+
+        }
+
+      }), score += Math.floor(speed * e * 12), score >= 5e3 && lastAchievementScore < 5e3 ? (showAchievement("5K MILES SURVIVED"), lastAchievementScore = 5e3) : score >= 15e3 && lastAchievementScore < 15e3 ? (showAchievement("LEGENDARY DRIVER"), lastAchievementScore = 15e3) : score >= 5e4 && lastAchievementScore < 5e4 && (showAchievement("HIGHWAY LEGEND"), lastAchievementScore = 5e4), score > highScore && (highScore = score, saveUpgrades()), updateSpeedLines(speed), updateHUD()
+
+    }
+
+
+
+    function updateTraffic(e) {
+
+      traffic.forEach(t => {
+
+        t.group.position.z += (35 + 5 * Math.sin(.002 * Date.now() + .01 * t.group.position.z)) * e * 2.2, t.group.position.z > player.z + 250 && (t.group.position.z = player.z - 1e3 - 600 * Math.random(), t.group.position.x = (Math.floor(Math.random() * CONFIG.laneCount) - CONFIG.laneCount / 2 + .5) * (CONFIG.roadWidth / CONFIG.laneCount)), checkBoxCollision(player.group, t.group, 2.2, 3.2) && (hitPlayer(), t.group.position.z = player.z + 120)
+
+      })
+
+    }
+
+
+
+    function updateTruck(e) {
+
+      const t = Math.abs(player.z - truck.group.position.z);
+
+      if (!truck.active && score > 1500 && (Math.random() < .003 || Math.floor(score / 5e3) % 2 == 0 && score % 5e3 < 100) && activateTruck(), truck.active) {
+
+        truck.speed = THREE.MathUtils.damp(truck.speed, 1.15 * speed + 15, 8, e);
+
+        const o = .6,
+
+          a = player.group.position.x + player.vx * o + .5 * Math.sin(.003 * Date.now()) - truck.group.position.x;
+
+        if (truck.group.position.x += 4.5 * a * e, truck.group.position.z += truck.speed * e * 2.2, truck.group.rotation.z = .08 * -a, truck.group.rotation.y = .04 * a, truck.beamL && truck.beamR) {
+
+          truck.beamL.visible = !0, truck.beamR.visible = !0;
+
+          const e = .15 * a;
+
+          truck.beamL.rotation.z = e, truck.beamR.rotation.z = e
+
+        }
+
+        if (t < 400) {
+
+          const e = 1 - t / 400,
+
+            o = .5 * Math.sin(.025 * Date.now()) + .5;
+
+          document.getElementById("warning").style.opacity = e * o
+
+        }
+
+        checkBoxCollision(player.group, truck.group, 2.8, 5.2) && endGame(), truck.group.position.z > player.z + 600 && deactivateTruck()
+
+      }
+
+    }
+
+
+
+    function activateTruck() {
+
+      truck.active = !0, truck.group.visible = !0, truck.group.position.z = player.z - 500, truck.group.position.x = player.group.position.x + 8 * (Math.random() - .5), truck.state = "CHASE", truck.speed = .85 * speed, document.getElementById("minimap-truck").style.display = "block", showAchievement("MR. TRUCK SPOTTED")
+
+    }
+
+
+
+    function deactivateTruck() {
+
+      truck.active = !1, truck.group.visible = !1, truck.beamL && (truck.beamL.visible = !1), truck.beamR && (truck.beamR.visible = !1), document.getElementById("warning").style.opacity = 0, document.getElementById("minimap-truck").style.display = "none"
+
+    }
+
+
+
+    function checkBoxCollision(e, t, o, a) {
+
+      const s = Math.abs(e.position.x - t.position.x),
+
+        n = Math.abs(e.position.z - t.position.z);
+
+      return s < .8 * (o + a) && n < .8 * (o + a)
+
+    }
+
+
+
+    function hitPlayer() {
+
+      lives--, updateHUD(), damageFlash = 1;
+
+      const e = document.getElementById("damage-overlay");
+
+      e.style.opacity = "0.6", setTimeout(() => {
+
+        e.style.opacity = "0"
+
+      }, 150), document.body.style.filter = "hue-rotate(20deg) saturate(1.3)", setTimeout(() => {
+
+        document.body.style.filter = "none"
+
+      }, 100), lives <= 0 && endGame()
+
+    }
+
+
+
+    function endGame() {
+
+      gameActive = !1, composer.passes[4] && (composer.passes[4].enabled = !1), document.getElementById("game-over").style.opacity = "1", document.getElementById("game-over").style.pointerEvents = "auto", document.getElementById("final-score").textContent = `Score: ${score.toLocaleString()}`, document.getElementById("warning").style.opacity = 0, document.getElementById("minimap-truck").style.display = "none", deactivateTruck(), showAchievement("FINAL SCORE: " + score.toLocaleString()), saveUpgrades()
+
+    }
+
+
+
+    function updateHUD() {
+
+      document.getElementById("score").textContent = score.toLocaleString(), document.getElementById("speed").textContent = Math.floor(1.367 * speed) + " MPH";
+
+      const e = document.getElementById("camera-mode");
+
+      e && (e.textContent = CAMERA_MODES[cameraMode]);
+
+      const t = document.getElementById("lives");
+
+      t.innerHTML = "";
+
+      for (let e = 0; e < lives; e++) {
+
+        const e = document.createElement("div");
+
+        e.className = "heart", t.appendChild(e)
+
+      }
+
+      const o = document.getElementById("minimap-player");
+
+      if (o.style.left = "50%", o.style.top = "50%", truck.active) {
+
+        const e = 50 + (truck.group.position.z - player.z) / 600 * 40;
+
+        document.getElementById("minimap-truck").style.top = Math.max(10, Math.min(90, e)) + "%", document.getElementById("minimap-truck").style.left = "50%"
+
+      }
+
+    }
+
+
+
+    function initSpeedLines() {
+
+      const e = document.getElementById("speed-lines");
+
+      for (let t = 0; t < 25; t++) {
+
+        const t = document.createElement("div");
+
+        t.className = "speed-line", t.style.left = 100 * Math.random() + "%", t.style.animationDelay = .5 * Math.random() + "s", t.style.opacity = .3 + .4 * Math.random(), e.appendChild(t), speedLines.push(t)
+
+      }
+
+    }
+
+
+
+    function updateSpeedLines(e) {
+
+      const t = document.getElementById("speed-lines"),
+
+        o = CONFIG.cinematic.speedLinesThreshold;
+
+      if (e > o) {
+
+        t.style.opacity = Math.min(1, (e - o) / 60);
+
+        const a = .4 - Math.min(.3, (e - o) / 200);
+
+        speedLines.forEach(e => {
+
+          e.style.animationDuration = a + "s"
+
+        })
+
+      } else t.style.opacity = "0"
+
+    }
+
+
+
+    function updateCamera(e) {
+
+      const t = .001 * Date.now(),
+
+        o = speed / 140;
+
+      if (motorcycleGroup) {
+
+        if (motorcycleGroup.position.copy(player.group.position), motorcycleGroup.position.y = 0, motorcycleGroup.rotation.y = player.group.rotation.y, motorcycleGroup.userData.speedometerNeedle) {
+
+          const e = motorcycleGroup.userData.speedometerNeedle,
+
+            t = Math.min(1, speed / 140);
+
+          e.rotation.z = e.userData.baseRotation + (e.userData.maxRotation - e.userData.baseRotation) * t
+
+        }
+
+        motorcycleGroup.userData.vibrationElements && motorcycleGroup.userData.vibrationElements.forEach(e => {
+
+          const o = Math.min(1, speed / 100);
+
+          e.scale.set(e.userData.baseScale + Math.sin(30 * t) * o * .3, e.userData.baseScale + Math.cos(35 * t) * o * .3, 1)
+
+        })
+
+      }
+
+      const a = player.group.position.x,
+
+        s = 0 === cameraMode ? 14 + .04 * speed : 1 === cameraMode ? player.group.position.y + 1.65 : 50 + 30 * o,
+
+        n = 0 === cameraMode ? player.group.position.z + 35 + .08 * speed : 1 === cameraMode ? player.group.position.z + .4 : player.group.position.z + Math.cos(t * (.15 + .1 * o)) * (60 + 20 * o),
+
+        r = 1 - Math.pow(.01, e);
+
+      cameraTarget.x += (a - cameraTarget.x) * r, cameraTarget.y += (s - cameraTarget.y) * r, cameraTarget.z += (n - cameraTarget.z) * r, Math.abs(cameraTarget.x - a) < .002 && (cameraTarget.x = a), Math.abs(cameraTarget.y - s) < .002 && (cameraTarget.y = s), Math.abs(cameraTarget.z - n) < .002 && (cameraTarget.z = n), camera.position.set(cameraTarget.x, cameraTarget.y, cameraTarget.z), camera.rotation.set(0, 0, 0), camera.up.set(0, 1, 0);
+
+      const i = 1 === cameraMode ? 45 + .25 * speed : 25 + .1 * speed,
+
+        c = new THREE.Vector3(player.group.position.x, 1 === cameraMode ? 1.5 : 1.2, player.group.position.z - i);
+
+      camera.lookAt(c);
+
+      const d = (1 === cameraMode ? 78 : 65) + Math.min(
+
+        1 === cameraMode ? 12 : 15,
+
+        speed * (1 === cameraMode ? 0.09 : 0.12)
+
+      );
+
+      if (camera.fov = THREE.MathUtils.damp(camera.fov, d, 6, e), camera.updateProjectionMatrix(), 1 === cameraMode && speed > 15) {
+
+        const t = 9 + .08 * speed,
+
+          o = speed / 140 * .02;
+
+        camera.position.y += Math.sin(0.012 * Date.now() * t) * o; camera.rotation.z = THREE.MathUtils.damp(camera.rotation.z, .012 * player.vx, 5, e)
+
+      }
+
+      scene.children.forEach(e => {
+
+        e.isDirectionalLight && (e.position.x = player.group.position.x + (e === scene.children[2] ? 80 : -50), e.position.z = player.group.position.z + (e === scene.children[2] ? -40 : 80), e.target.position.copy(player.group.position), e.target.updateMatrixWorld())
+
+      })
+
+    }
+
+
+
+    function updateDamageFlash(e) {
+
+      if (damageFlash > 0) {
+
+        damageFlash -= 3 * e;
+
+        document.getElementById("damage-overlay").style.opacity = Math.max(0, .6 * damageFlash)
+
+      }
+
+    }
+
+
+
+    function animate() {
+
+      requestAnimationFrame(animate);
+
+      const e = Math.min(clock.getDelta(), .1),
+
+        t = clock.getElapsedTime();
+
+      gameActive ? (updatePlayer(e), updateTraffic(e), updateTruck(e), highwayManager.update(player.z), updateCamera(e), updateDamageFlash(e), composer.passes[3] && (composer.passes[3].uniforms.time.value = t), composer.passes[4] && composer.passes[4].enabled && (renderer.setRenderTarget(prevRenderTarget), renderer.render(scene, camera), renderer.setRenderTarget(null)), composer.render()) : (camera.position.x = 60 * Math.sin(.3 * t), camera.position.z = 60 * Math.cos(.3 * t) + 250, camera.position.y = 25 + 3 * Math.sin(.5 * t), camera.lookAt(0, 2, -50), camera.fov = 60 + 3 * Math.sin(.2 * t), camera.updateProjectionMatrix(), scene.rotation.y = .02 * t, renderer.render(scene, camera))
+
+    }
+
+
+
+    function onResize() {
+
+      const e = window.innerWidth,
+
+        t = window.innerHeight;
+
+      camera.aspect = e / t, camera.updateProjectionMatrix(), renderer.setSize(e, t), renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)), composer.setSize(e, t), composer.passes[1] && composer.passes[1].material.uniforms.resolution.value.set(1 / (e * renderer.getPixelRatio()), 1 / (t * renderer.getPixelRatio())), composer.passes[2] && composer.passes[2].resolution.set(e, t), prevRenderTarget && prevRenderTarget.setSize(e, t)
+
+    }
+
+
+
+    function showCameraHint() {
+
+      const e = document.getElementById("camera-hint");
+
+      e.style.opacity = "1", clearTimeout(cameraHintTimeout), cameraHintTimeout = setTimeout(() => {
+
+        e.style.opacity = "0", cameraHintTimeout = null
+
+      }, 5e3)
+
+    }
+
+
+
+    function switchCameraMode() {
+
+      cameraMode = (cameraMode + 1) % 3;
+
+      const e = document.getElementById("camera-mode");
+
+      e && (e.textContent = CAMERA_MODES[cameraMode]), motorcycleGroup && (motorcycleGroup.visible = 1 === cameraMode), showCameraHint(), showAchievement(`Camera: ${CAMERA_MODES[cameraMode]}`), resetCameraTarget()
+
+    }
+
+
+
+    function resetCameraTarget() {
+
+      const e = player.group.position;
+
+      cameraTarget.x = e.x, cameraTarget.y = 0 === cameraMode ? 14 + .04 * speed : 1 === cameraMode ? e.y + 1.65 : 50, cameraTarget.z = 0 === cameraMode ? e.z + 35 + .08 * speed : 1 === cameraMode ? e.z + .4 : e.z + 60, camera.position.set(cameraTarget.x, cameraTarget.y, cameraTarget.z), camera.rotation.set(0, 0, 0), camera.up.set(0, 1, 0)
+
+    }
+
+    window.addEventListener("beforeunload", () => {
+
+      player.exhaustLeft && player.exhaustLeft.dispose(), player.exhaustRight && player.exhaustRight.dispose(), traffic.forEach(e => {
+
+        e.exhaust && e.exhaust.dispose()
+
+      }), highwayManager && highwayManager.dispose(), prevRenderTarget && prevRenderTarget.dispose(), composer && composer.dispose(), renderer.dispose(), saveUpgrades()
+
+    }), window.addEventListener("load", () => {
+
+      setTimeout(() => {
+
+        const e = document.getElementById("btn-shop"),
+
+          t = document.getElementById("btn-shop-go");
+
+        console.log("🔍 btn-shop exists:", !!e, "visible:", null !== e?.offsetParent), console.log("🔍 btn-shop-go exists:", !!t, "visible:", null !== t?.offsetParent), e && t || console.error("❌ Shop buttons missing from HTML! Check your menu/game-over divs.")
+
+      }, 1e3)
+
+    }), 
+
+// Block context menu globally for mobile
+
+window.addEventListener('contextmenu', (e) => {
+
+  if(e.target.closest('#mobile-controls, #canvas-container, button')) {
+
+    e.preventDefault();
+
+  }
+
+}, {capture: true});
+
+/* ======================================================
+
+   MR. TRUCK'S REVENGE — 55 FEATURE QoL PACK
+
+   Paste inside the main module script BEFORE init();
+
+   ====================================================== */
+
+(() => {
+
+  const byId = (id) => document.getElementById(id);
+
+
+
+  const store = {
+
+    get(k, fallback = null) {
+
+      try {
+
+        const v = localStorage.getItem(k);
+
+        return v === null ? fallback : v;
+
+      } catch (e) {
+
+        return fallback;
+
+      }
+
+    },
+
+    set(k, v) {
+
+      try {
+
+        localStorage.setItem(k, v);
+
+      } catch (e) {}
+
+    },
+
+    getInt(k, fallback = 0) {
+
+      const n = parseInt(this.get(k, String(fallback)), 10);
+
+      return Number.isFinite(n) ? n : fallback;
+
+    }
+
+  };
+
+
+
+  const make = (id, tag, css = "", html = "") => {
+
+    let el = byId(id);
+
+    if (!el) {
+
+      el = document.createElement(tag);
+
+      el.id = id;
+
+      if (css) el.style.cssText = css;
+
+      if (html) el.innerHTML = html;
+
+      document.body.appendChild(el);
+
+    }
+
+    return el;
+
+  };
+
+
+
+  /* Create UI containers */
+
+  const chips = make("mtr-chips", "div");
+
+
+
+  make("mtr-fps", "div");
+
+
+
+  const graph = make("mtr-fps-graph", "canvas");
+
+  graph.width = 130;
+
+  graph.height = 38;
+
+
+
+  make("mtr-truckbar", "div", "", "<div></div>");
+
+
+
+  make(
+
+    "mtr-pause",
+
+    "div",
+
+    "position:fixed;inset:0;z-index:1200;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.62);color:#00ffd5;font:900 56px system-ui;letter-spacing:4px;text-shadow:0 0 35px rgba(0,255,213,.7);pointer-events:none;",
+
+    "PAUSED"
+
+  );
+
+
+
+  make(
+
+    "mtr-countdown",
+
+    "div",
+
+    "position:fixed;inset:0;z-index:1300;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);color:#ffd700;font:900 100px system-ui;text-shadow:0 0 50px rgba(255,215,0,.75);pointer-events:none;"
+
+  );
+
+
+
+  make("mtr-rain", "div");
+
+  make("mtr-snow", "div");
+
+
+
+  make(
+
+    "mtr-qol",
+
+    "div",
+
+    "",
+
+    `
+
+    <div class="mtr-qol-title">QoL 55</div>
+
+
+
+    <label>Traffic <span id="mtr-traffic-val">20</span></label>
+
+    <input id="mtr-traffic" type="range" min="0" max="40" value="20">
+
+
+
+    <label>View <span id="mtr-view-val">15</span></label>
+
+    <input id="mtr-view" type="range" min="6" max="25" value="15">
+
+
+
+    <label>Car Color</label>
+
+    <div style="display:flex;gap:6px;margin:6px 0;">
+
+      <input type="color" id="mtr-car-color" value="#00ff55"
+
+        style="width:38px;height:30px;border:none;background:none;cursor:pointer;padding:0;">
+
+      <button id="mtr-car-random" class="mtr-mini" type="button">🎨</button>
+
+    </div>
+
+
+
+    <div class="mtr-qol-btns">
+
+      <button id="mtr-export" class="mtr-mini" type="button">Export</button>
+
+      <button id="mtr-import" class="mtr-mini" type="button">Import</button>
+
+      <button id="mtr-reset" class="mtr-mini danger" type="button">Reset</button>
+
+      <button id="mtr-credits-btn" class="mtr-mini" type="button">Credits</button>
+
+    </div>
+
+
+
+    <input type="file" id="mtr-import-file" accept="application/json" style="display:none">
+
+    `
+
+  );
+
+
+
+  make("mtr-version", "div");
+
+
+
+  make(
+
+    "mtr-credits",
+
+    "div",
+
+    "",
+
+    `
+
+    <div class="mtr-credits-box">
+
+      <h2>MR. TRUCK'S REVENGE QoL 1</h2>
+
+      <p>Owner / Lead Dev: <strong>Desmond</strong></p>
+
+      <p>Bug Hunter: <strong>Emile</strong></p>
+
+      <p>IT Mascot: <strong>Rebecca "Becky" Knips</strong></p>
+
+      <p style="font-size:12px;color:#889;margin-top:14px;">
+
+        P Pause • F Fullscreen • U HUD • M Minimap • K Screenshot<br>
+
+        Q Quality • E Corn • Z Zen • X Hard • T No Nitro<br>
+
+        R Engine • Y Music • G Horn • N Night • O Credits<br>
+
+        1 Rain • 2 Snow • 3 CRT Off • 4-8 Visual Modes
+
+      </p>
+
+      <button id="mtr-credits-close" type="button">CLOSE</button>
+
+    </div>
+
+    `
+
+  );
+
+
+
+  byId("mtr-version").textContent = "MR. TRUCK'S REVENGE // QoL 55";
+
+
+
+  const qolPanel = byId("mtr-qol");
+
+  if (qolPanel) {
+
+    qolPanel.addEventListener("keydown", (e) => e.stopPropagation());
+
+  }
+
+
+
+  function addChip(id, text) {
+
+    let el = byId(id);
+
+    if (!el) {
+
+      el = document.createElement("div");
+
+      el.id = id;
+
+      el.className = "mtr-chip";
+
+      el.textContent = text;
+
+      chips.appendChild(el);
+
+    }
+
+    return el;
+
+  }
+
+
+
+  /* 1. Telemetry bridge */
+
+  setInterval(() => {
+
+    try {
+
+      window.__MTR = {
+
+        score: typeof score !== "undefined" ? score : 0,
+
+        speed: typeof speed !== "undefined" ? speed : 0,
+
+        lives: typeof lives !== "undefined" ? lives : 0,
+
+        gameActive: typeof gameActive !== "undefined" ? gameActive : false,
+
+        distance:
+
+          typeof player !== "undefined" && player?.group
+
+            ? Math.max(0, -player.group.position.z)
+
+            : 0,
+
+        truckActive:
+
+          typeof truck !== "undefined" && truck?.active ? true : false,
+
+        truckDist:
+
+          typeof truck !== "undefined" && truck?.active && player
+
+            ? Math.abs(player.z - truck.group.position.z)
+
+            : null,
+
+        quality: typeof QualityManager !== "undefined" ? QualityManager.tier : 0
+
+      };
+
+    } catch (e) {}
+
+  }, 200);
+
+
+
+  /* 2 + 3. FPS meter + graph */
+
+  let fps = 0;
+
+  let frames = 0;
+
+  let lastFpsTime = performance.now();
+
+  const fpsData = [];
+
+  const gctx = graph.getContext("2d");
+
+
+
+  function drawFpsGraph() {
+
+    if (!gctx || !graph) return;
+
+    gctx.clearRect(0, 0, graph.width, graph.height);
+
+    gctx.strokeStyle = "#00ffd5";
+
+    gctx.lineWidth = 1.5;
+
+    gctx.beginPath();
+
+
+
+    fpsData.forEach((v, i) => {
+
+      const x = (i / 79) * graph.width;
+
+      const clamped = Math.min(60, Math.max(0, v));
+
+      const y = graph.height - (clamped / 60) * graph.height;
+
+      if (i === 0) gctx.moveTo(x, y);
+
+      else gctx.lineTo(x, y);
+
+    });
+
+
+
+    gctx.stroke();
+
+  }
+
+
+
+  function fpsLoop() {
+
+    frames++;
+
+    const now = performance.now();
+
+    if (now - lastFpsTime >= 500) {
+
+      fps = Math.round((frames * 1000) / (now - lastFpsTime));
+
+      frames = 0;
+
+      lastFpsTime = now;
+
+
+
+      const fpsEl = byId("mtr-fps");
+
+      if (fpsEl) fpsEl.textContent = "FPS " + fps;
+
+
+
+      fpsData.push(fps);
+
+      if (fpsData.length > 80) fpsData.shift();
+
+      drawFpsGraph();
+
+    }
+
+    requestAnimationFrame(fpsLoop);
+
+  }
+
+  requestAnimationFrame(fpsLoop);
+
+
+
+  /* 4. Pause overlay */
+
+  let paused = false;
+
+  const pauseEl = byId("mtr-pause");
+
+
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code !== "KeyP" || e.repeat) return;
+
+
+
+    if (!paused && !gameActive) return;
+
+
+
+    paused = !paused;
+
+    gameActive = !paused;
+
+
+
+    if (pauseEl) pauseEl.style.display = paused ? "flex" : "none";
+
+  });
+
+
+
+  window.__mtrResume = () => {
+
+    if (paused) {
+
+      paused = false;
+
+      gameActive = true;
+
+      if (pauseEl) pauseEl.style.display = "none";
+
+    }
+
+  };
+
+
+
+  /* 5. Auto-pause on blur */
+
+  window.addEventListener("blur", () => {
+
+    if (gameActive && !paused) {
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyP" }));
+
+    }
+
+  });
+
+
+
+  /* 6. Fullscreen */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyF" && !e.repeat) {
+
+      try {
+
+        if (!document.fullscreenElement) {
+
+          document.documentElement.requestFullscreen?.();
+
+        } else {
+
+          document.exitFullscreen?.();
+
+        }
+
+      } catch (err) {}
+
+    }
+
+  });
+
+
+
+  /* 7. Hide HUD */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyU" && !e.repeat) {
+
+      const hud = byId("hud");
+
+      if (hud) hud.style.opacity = hud.style.opacity === "0" ? "1" : "0";
+
+    }
+
+  });
+
+
+
+  /* 8. Hide minimap */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyM" && !e.repeat) {
+
+      const mini = byId("minimap");
+
+      if (mini) mini.style.display = mini.style.display === "none" ? "block" : "none";
+
+    }
+
+  });
+
+
+
+  /* 9. Screenshot */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyK" && !e.repeat) {
+
+      const canvas = document.querySelector("#canvas-container canvas");
+
+      if (!canvas) return;
+
+
+
+      try {
+
+        if (typeof composer !== "undefined") composer.render();
+
+
+
+        const a = document.createElement("a");
+
+        a.download = "mr-trucks-revenge.png";
+
+        a.href = canvas.toDataURL("image/png");
+
+        a.click();
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("SCREENSHOT SAVED");
+
+        }
+
+      } catch (err) {
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("SCREENSHOT FAILED");
+
+        }
+
+      }
+
+    }
+
+  });
+
+
+
+  /* 10. Enter restart on game over */
+
+  window.addEventListener("keydown", (e) => {
+
+    const go = byId("game-over");
+
+    if (go && getComputedStyle(go).opacity === "1" && e.code === "Enter") {
+
+      byId("btn-restart")?.click();
+
+    }
+
+  });
+
+
+
+  /* 11. Best score chip */
+
+  const chipBest = addChip("mtr-best", "BEST 0");
+
+  setInterval(() => {
+
+    const localBest = store.getInt("mtr_highscore_v2", 0);
+
+    const liveBest = Math.max(localBest, typeof score !== "undefined" ? score : 0);
+
+    chipBest.textContent = "BEST " + liveBest.toLocaleString();
+
+  }, 1000);
+
+
+
+  /* 12. Session timer chip */
+
+  const chipTime = addChip("mtr-time", "00:00");
+
+  let sessionSeconds = 0;
+
+  setInterval(() => {
+
+    sessionSeconds++;
+
+    const mm = String(Math.floor(sessionSeconds / 60)).padStart(2, "0");
+
+    const ss = String(sessionSeconds % 60).padStart(2, "0");
+
+    chipTime.textContent = `${mm}:${ss}`;
+
+  }, 1000);
+
+
+
+  /* 13. Distance chip */
+
+  const chipDist = addChip("mtr-dist", "0 m");
+
+  setInterval(() => {
+
+    const d = Math.max(0, -(player?.group?.position?.z || 0));
+
+    chipDist.textContent = Math.floor(d / 10) + " m";
+
+  }, 250);
+
+
+
+  /* 14. Truck proximity bar */
+
+  const truckBar = byId("mtr-truckbar");
+
+  const truckFill = truckBar?.querySelector("div");
+
+  setInterval(() => {
+
+    if (!truckBar || !truckFill) return;
+
+
+
+    if (truck?.active && player?.group) {
+
+      const dist = Math.abs(player.z - truck.group.position.z);
+
+      const pct = Math.max(0, 1 - dist / 400) * 100;
+
+      truckBar.style.opacity = "1";
+
+      truckFill.style.width = pct + "%";
+
+    } else {
+
+      truckBar.style.opacity = "0";
+
+      truckFill.style.width = "0%";
+
+    }
+
+  }, 200);
+
+
+
+  /* 15. Speed warning color */
+
+  setInterval(() => {
+
+    const speedEl = byId("speed");
+
+    if (!speedEl) return;
+
+    speedEl.style.color = (speed || 0) > 120 ? "var(--danger)" : "";
+
+  }, 250);
+
+
+
+  /* 16. Crash counter */
+
+  let crashCount = 0;
+
+  const chipCrash = addChip("mtr-crash", "HITS 0");
+
+  const damageOverlay = byId("damage-overlay");
+
+
+
+  if (damageOverlay) {
+
+    new MutationObserver(() => {
+
+      const o = parseFloat(damageOverlay.style.opacity || "0");
+
+      if (o > 0.1) {
+
+        crashCount++;
+
+        chipCrash.textContent = "HITS " + crashCount;
+
+      }
+
+    }).observe(damageOverlay, { attributes: true, attributeFilter: ["style"] });
+
+  }
+
+
+
+  /* 17. Quality chip */
+
+  const chipQuality = addChip("mtr-quality", "GPU AUTO");
+
+  const qualityNames = ["POTATO", "LOW", "MED", "ULTRA"];
+
+  setInterval(() => {
+
+    const tier = QualityManager?.tier ?? 0;
+
+    chipQuality.textContent = "GPU " + (qualityNames[tier] || "AUTO");
+
+  }, 500);
+
+
+
+  /* 18. Low-life pulse */
+
+  setInterval(() => {
+
+    document.body.classList.toggle("mtr-low-life", (lives || 3) === 1);
+
+  }, 500);
+
+
+
+  /* 19. Speed record */
+
+  let speedBest = store.getInt("mtr_speed_best", 0);
+
+  const chipSpeedBest = addChip("mtr-speedbest", "REC 0 MPH");
+
+  setInterval(() => {
+
+    const mph = Math.floor((speed || 0) * 1.367);
+
+    if (mph > speedBest) {
+
+      speedBest = mph;
+
+      store.set("mtr_speed_best", String(speedBest));
+
+    }
+
+    chipSpeedBest.textContent = "REC " + speedBest + " MPH";
+
+  }, 500);
+
+
+
+  /* 20. Total playtime */
+
+  let totalPlay = store.getInt("mtr_playtime", 0);
+
+  const chipTotal = addChip("mtr-total", "TOTAL 0m");
+
+  setInterval(() => {
+
+    if (gameActive) {
+
+      totalPlay++;
+
+      store.set("mtr_playtime", String(totalPlay));
+
+    }
+
+    chipTotal.textContent = "TOTAL " + Math.floor(totalPlay / 60) + "m";
+
+  }, 1000);
+
+
+
+  /* 21. Near-miss bonus */
+
+  const nearCounted = new WeakSet();
+
+  setInterval(() => {
+
+    if (!gameActive || !player?.group || !Array.isArray(traffic)) return;
+
+
+
+    const px = player.group.position.x;
+
+    const pz = player.group.position.z;
+
+
+
+    traffic.forEach((t) => {
+
+      if (!t?.group) return;
+
+
+
+      const dz = Math.abs(t.group.position.z - pz);
+
+      const dx = Math.abs(t.group.position.x - px);
+
+
+
+      if (dz < 9 && dx > 2.4 && dx < 4.8 && !nearCounted.has(t)) {
+
+        nearCounted.add(t);
+
+        score += 250;
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("NEAR MISS +250");
+
+        }
+
+
+
+        setTimeout(() => nearCounted.delete(t), 3000);
+
+      }
+
+    });
+
+  }, 100);
+
+
+
+  /* 22. Combo multiplier */
+
+  let combo = 1;
+
+  let comboTimer = 0;
+
+  const chipCombo = addChip("mtr-combo", "COMBO x1");
+
+
+
+  if (damageOverlay) {
+
+    new MutationObserver(() => {
+
+      const o = parseFloat(damageOverlay.style.opacity || "0");
+
+      if (o > 0.1) {
+
+        combo = 1;
+
+        chipCombo.textContent = "COMBO x1";
+
+      }
+
+    }).observe(damageOverlay, { attributes: true, attributeFilter: ["style"] });
+
+  }
+
+
+
+  setInterval(() => {
+
+    if (!gameActive) return;
+
+
+
+    comboTimer += 250;
+
+
+
+    if (comboTimer >= 8000) {
+
+      combo = Math.min(5, combo + 1);
+
+      comboTimer = 0;
+
+      chipCombo.textContent = "COMBO x" + combo;
+
+
+
+      if (typeof showAchievement === "function") {
+
+        showAchievement("COMBO x" + combo);
+
+      }
+
+    }
+
+
+
+    score += Math.floor(((speed || 0) / 140) * combo);
+
+  }, 250);
+
+
+
+  /* 23. Countdown before start — CAMERA-SNAP FIX */
+
+(() => {
+
+  const countEl =
+
+    document.getElementById("mtr-countdown") ||
+
+    (() => {
+
+      const el = document.createElement("div");
+
+      el.id = "mtr-countdown";
+
+      el.style.cssText =
+
+        "position:fixed;inset:0;z-index:1300;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);color:#ffd700;font:900 100px system-ui;text-shadow:0 0 50px rgba(255,215,0,.75);pointer-events:none;";
+
+      document.body.appendChild(el);
+
+      return el;
+
+    })();
+
+
+
+  const oldStartGame = startGame;
+
+  const oldHitPlayer = hitPlayer;
+
+  const oldEndGame = endGame;
+
+
+
+  let counting = false;
+
+
+
+  // Prevent damage / game over during countdown.
+
+  hitPlayer = function () {
+
+    if (counting) return;
+
+    oldHitPlayer();
+
+  };
+
+
+
+  endGame = function () {
+
+    if (counting) return;
+
+    oldEndGame();
+
+  };
+
+
+
+  const controlKeys = new Set([
+
+    "ArrowUp",
+
+    "ArrowDown",
+
+    "ArrowLeft",
+
+    "ArrowRight",
+
+    "KeyW",
+
+    "KeyA",
+
+    "KeyS",
+
+    "KeyD",
+
+    "Space"
+
+  ]);
+
+
+
+  let blocker = null;
+
+
+
+  function lockControls() {
+
+    controlKeys.forEach((k) => {
+
+      keys[k] = false;
+
+    });
+
+
+
+    speed = 0;
+
+
+
+    if (!blocker) {
+
+      blocker = (e) => {
+
+        if (!counting) return;
+
+
+
+        if (controlKeys.has(e.code)) {
+
+          e.stopImmediatePropagation();
+
+          keys[e.code] = false;
+
+        }
+
+      };
+
+
+
+      window.addEventListener("keydown", blocker, true);
+
+    }
+
+  }
+
+
+
+  function unlockControls() {
+
+    controlKeys.forEach((k) => {
+
+      keys[k] = false;
+
+    });
+
+
+
+    if (blocker) {
+
+      window.removeEventListener("keydown", blocker, true);
+
+      blocker = null;
+
+    }
+
+  }
+
+
+
+  function pushTrafficAway() {
+
+    if (!Array.isArray(traffic)) return;
+
+
+
+    traffic.forEach((t) => {
+
+      if (t?.group) {
+
+        t.group.position.z = player.z - 1200 - Math.random() * 800;
+
+      }
+
+    });
+
+  }
+
+
+
+  startGame = function () {
+
+    if (counting) return;
+
+
+
+    counting = true;
+
+
+
+    // Start immediately so the camera snaps to the car.
+
+    oldStartGame();
+
+
+
+    // Freeze gameplay input during countdown.
+
+    lockControls();
+
+    pushTrafficAway();
+
+
+
+    countEl.style.display = "flex";
+
+
+
+    let n = 3;
+
+    countEl.textContent = n;
+
+
+
+    const iv = setInterval(() => {
+
+      lockControls();
+
+      pushTrafficAway();
+
+
+
+      n--;
+
+
+
+      if (n > 0) {
+
+        countEl.textContent = n;
+
+      } else {
+
+        clearInterval(iv);
+
+
+
+        countEl.textContent = "GO!";
+
+
+
+        setTimeout(() => {
+
+          countEl.style.display = "none";
+
+
+
+          counting = false;
+
+
+
+          // If auto-pause happened during countdown, resume safely.
+
+          window.__mtrResume?.();
+
+
+
+          unlockControls();
+
+
+
+          if (typeof showAchievement === "function") {
+
+            showAchievement("GO!");
+
+          }
+
+        }, 350);
+
+      }
+
+    }, 700);
+
+  };
+
+})();
+
+  /* 24. Zen Mode */
+
+  let zenMode = false;
+
+  const oldActivateTruck = activateTruck;
+
+
+
+  activateTruck = function () {
+
+    if (zenMode) return;
+
+    oldActivateTruck();
+
+  };
+
+
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyZ" && !e.repeat) {
+
+      zenMode = !zenMode;
+
+
+
+      if (zenMode && typeof deactivateTruck === "function") {
+
+        deactivateTruck();
+
+      }
+
+
+
+      if (typeof showAchievement === "function") {
+
+        showAchievement("ZEN MODE: " + (zenMode ? "ON" : "OFF"));
+
+      }
+
+    }
+
+  });
+
+
+
+  /* 25. Hard Mode */
+
+  let hardMode = false;
+
+
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyX" && !e.repeat) {
+
+      hardMode = !hardMode;
+
+
+
+      if (typeof showAchievement === "function") {
+
+        showAchievement("HARD MODE: " + (hardMode ? "ON" : "OFF"));
+
+      }
+
+    }
+
+  });
+
+
+
+  setInterval(() => {
+
+    if (hardMode && truck?.active) {
+
+      truck.speed = Math.max(truck.speed, (speed || 0) * 1.25 + 25);
+
+    }
+
+  }, 250);
+
+
+
+  /* 26. Traffic density slider */
+
+  const trafficInput = byId("mtr-traffic");
+
+  const trafficVal = byId("mtr-traffic-val");
+
+
+
+  function addTrafficOne() {
+
+    if (!scene || typeof createTrafficCar !== "function" || !mats?.traffic) return;
+
+
+
+    const lane = Math.floor(Math.random() * CONFIG.laneCount);
+
+    const laneW = CONFIG.roadWidth / CONFIG.laneCount;
+
+    const x = (lane - CONFIG.laneCount / 2 + 0.5) * laneW;
+
+    const z = (player?.z || 0) - 150 - 1500 * Math.random();
+
+
+
+    const mat = mats.traffic[Math.floor(Math.random() * mats.traffic.length)];
+
+    const car = createTrafficCar(mat.color);
+
+
+
+    car.group.position.set(x, 0.5, z);
+
+    scene.add(car.group);
+
+
+
+    if (typeof ParticleSystem === "function") {
+
+      car.exhaust = new ParticleSystem(15, {
+
+        color: 6715272,
+
+        spread: 0.2,
+
+        offsetY: 0.25,
+
+        offsetZ: -2.2
+
+      });
+
+      scene.add(car.exhaust.points);
+
+    }
+
+
+
+    traffic.push(car);
+
+  }
+
+
+
+  function removeTrafficOne() {
+
+    const car = traffic.pop();
+
+    if (!car) return;
+
+
+
+    scene?.remove(car.group);
+
+
+
+    if (car.exhaust) {
+
+      car.exhaust.dispose?.();
+
+      scene?.remove(car.exhaust.points);
+
+    }
+
+
+
+    car.group?.traverse?.((o) => {
+
+      if (o.geometry) o.geometry.dispose?.();
+
+      if (o.material) {
+
+        const matsArray = Array.isArray(o.material) ? o.material : [o.material];
+
+        matsArray.forEach((m) => m.dispose?.());
+
+      }
+
+    });
+
+  }
+
+
+
+  if (trafficInput && trafficVal) {
+
+    trafficInput.value = CONFIG.trafficCount;
+
+    trafficVal.textContent = CONFIG.trafficCount;
+
+
+
+    trafficInput.addEventListener("input", () => {
+
+      if (!scene) return;
+
+
+
+      const target = parseInt(trafficInput.value, 10) || 0;
+
+      CONFIG.trafficCount = target;
+
+      trafficVal.textContent = target;
+
+
+
+      while (traffic.length < target) addTrafficOne();
+
+      while (traffic.length > target) removeTrafficOne();
+
+    });
+
+  }
+
+
+
+  /* 27. View distance slider */
+
+  const viewInput = byId("mtr-view");
+
+  const viewVal = byId("mtr-view-val");
+
+
+
+  if (viewInput && viewVal) {
+
+    viewInput.value = CONFIG.viewDistance;
+
+    viewVal.textContent = CONFIG.viewDistance;
+
+
+
+    viewInput.addEventListener("input", () => {
+
+      const target = parseInt(viewInput.value, 10) || 15;
+
+      CONFIG.viewDistance = target;
+
+      viewVal.textContent = target;
+
+
+
+      if (typeof showAchievement === "function") {
+
+        showAchievement("VIEW DISTANCE " + target);
+
+      }
+
+    });
+
+  }
+
+
+
+  /* 28. Quality cycle */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyQ" && !e.repeat && QualityManager?.setTier) {
+
+      QualityManager.setTier((QualityManager.tier + 1) % 4);
+
+    }
+
+  });
+
+
+
+  /* 29. Emergency Corn toggle */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyE" && !e.repeat) {
+
+      window.EMERGENCY_CORN_ACTIVE = !window.EMERGENCY_CORN_ACTIVE;
+
+      QualityManager?.apply?.();
+
+
+
+      if (typeof showAchievement === "function") {
+
+        showAchievement("CORN FIELD: " + (window.EMERGENCY_CORN_ACTIVE ? "ON" : "OFF"));
+
+      }
+
+    }
+
+  });
+
+
+
+  /* 30. Lane edge vibration */
+
+  setInterval(() => {
+
+    if (!gameActive || !player?.group) return;
+
+
+
+    const edge = CONFIG.roadWidth / 2 - 3;
+
+
+
+    if (Math.abs(player.group.position.x) > edge && navigator.vibrate) {
+
+      navigator.vibrate(10);
+
+    }
+
+  }, 300);
+
+
+
+  /* 31. Custom car color picker */
+
+  const carColor = byId("mtr-car-color");
+
+  if (carColor) {
+
+    carColor.addEventListener("input", () => {
+
+      if (mats?.playerBody) mats.playerBody.color.set(carColor.value);
+
+    });
+
+  }
+
+
+
+  /* 32. Random car color */
+
+  const carRandom = byId("mtr-car-random");
+
+  if (carRandom) {
+
+    carRandom.onclick = () => {
+
+      if (mats?.playerBody) {
+
+        mats.playerBody.color.setHSL(Math.random(), 0.8, 0.5);
+
+      }
+
+    };
+
+  }
+
+
+
+  /* 33. Traffic count chip */
+
+  const chipTraffic = addChip("mtr-trafficcount", "TRAFFIC 0");
+
+  setInterval(() => {
+
+    chipTraffic.textContent = "TRAFFIC " + (traffic?.length || 0);
+
+  }, 700);
+
+
+
+  /* 34. View distance chip */
+
+  const chipView = addChip("mtr-viewdist", "VIEW 15");
+
+  setInterval(() => {
+
+    chipView.textContent = "VIEW " + (CONFIG?.viewDistance || 0);
+
+  }, 700);
+
+
+
+  /* 35. No-nitro challenge */
+
+  let noNitro = false;
+
+
+
+  window.addEventListener(
+
+    "keydown",
+
+    (e) => {
+
+      if (e.code === "KeyT" && !e.repeat) {
+
+        noNitro = !noNitro;
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("NO NITRO: " + (noNitro ? "ON" : "OFF"));
+
+        }
+
+      }
+
+
+
+      if (noNitro && e.code === "Space" && gameActive) {
+
+        e.stopImmediatePropagation();
+
+      }
+
+    },
+
+    true
+
+  );
+
+
+
+  /* Audio helper */
+
+  let audioCtx = null;
+
+
+
+  function getAudio() {
+
+    try {
+
+      const AC = window.AudioContext || window.webkitAudioContext;
+
+      if (!AC) return null;
+
+
+
+      if (!audioCtx) audioCtx = new AC();
+
+
+
+      if (audioCtx.state === "suspended") {
+
+        audioCtx.resume().catch(() => {});
+
+      }
+
+
+
+      return audioCtx;
+
+    } catch (e) {
+
+      return null;
+
+    }
+
+  }
+
+
+
+  function tone(freq, dur, type = "sine", vol = 0.05) {
+
+    const ctx = getAudio();
+
+    if (!ctx) return;
+
+
+
+    const o = ctx.createOscillator();
+
+    const g = ctx.createGain();
+
+
+
+    o.type = type;
+
+    o.frequency.value = freq;
+
+
+
+    g.gain.setValueAtTime(vol, ctx.currentTime);
+
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+
+
+
+    o.connect(g).connect(ctx.destination);
+
+    o.start();
+
+    o.stop(ctx.currentTime + dur + 0.02);
+
+  }
+
+
+
+  function noise(dur, vol = 0.08) {
+
+    const ctx = getAudio();
+
+    if (!ctx) return;
+
+
+
+    const buffer = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+
+    const data = buffer.getChannelData(0);
+
+
+
+    for (let i = 0; i < data.length; i++) {
+
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 2);
+
+    }
+
+
+
+    const src = ctx.createBufferSource();
+
+    const g = ctx.createGain();
+
+
+
+    g.gain.value = vol;
+
+    src.buffer = buffer;
+
+
+
+    src.connect(g).connect(ctx.destination);
+
+    src.start();
+
+  }
+
+
+
+  /* 36. Engine sound */
+
+  let engineOn = false;
+
+  let engineOsc = null;
+
+  let engineGain = null;
+
+
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyR" && !e.repeat) {
+
+      engineOn = !engineOn;
+
+
+
+      const ctx = getAudio();
+
+      if (!ctx) return;
+
+
+
+      if (engineOn) {
+
+        engineOsc = ctx.createOscillator();
+
+        engineGain = ctx.createGain();
+
+
+
+        engineOsc.type = "sawtooth";
+
+        engineOsc.frequency.value = 60;
+
+        engineGain.gain.value = 0.02;
+
+
+
+        engineOsc.connect(engineGain).connect(ctx.destination);
+
+        engineOsc.start();
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("ENGINE SOUND ON");
+
+        }
+
+      } else {
+
+        engineOsc?.stop();
+
+        engineOsc?.disconnect();
+
+        engineGain?.disconnect();
+
+
+
+        engineOsc = null;
+
+        engineGain = null;
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("ENGINE SOUND OFF");
+
+        }
+
+      }
+
+    }
+
+  });
+
+
+
+  setInterval(() => {
+
+    if (!engineOn || !engineOsc || !engineGain) return;
+
+
+
+    const ctx = getAudio();
+
+    if (!ctx) return;
+
+
+
+    engineOsc.frequency.setTargetAtTime(50 + (speed || 0) * 1.4, ctx.currentTime, 0.08);
+
+    engineGain.gain.setTargetAtTime(gameActive ? 0.03 : 0.01, ctx.currentTime, 0.1);
+
+  }, 100);
+
+
+
+  /* 37. Achievement sound */
+
+  const achievementEl = byId("achievement");
+
+  if (achievementEl) {
+
+    new MutationObserver(() => {
+
+      if (achievementEl.classList.contains("show")) {
+
+        tone(880, 0.18, "triangle", 0.04);
+
+      }
+
+    }).observe(achievementEl, { attributes: true, attributeFilter: ["class"] });
+
+  }
+
+
+
+  /* 38. Crash sound */
+
+  if (damageOverlay) {
+
+    new MutationObserver(() => {
+
+      const o = parseFloat(damageOverlay.style.opacity || "0");
+
+      if (o > 0.1) noise(0.25, 0.1);
+
+    }).observe(damageOverlay, { attributes: true, attributeFilter: ["style"] });
+
+  }
+
+
+
+  /* 39. Nitro sound */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "Space" && gameActive && !noNitro) {
+
+      tone(220, 0.35, "sawtooth", 0.03);
+
+    }
+
+  });
+
+
+
+  /* 40. Horn */
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyG" && !e.repeat) {
+
+      tone(392, 0.35, "square", 0.04);
+
+      setTimeout(() => tone(494, 0.35, "square", 0.04), 30);
+
+    }
+
+  });
+
+/* ==========================================================
+   MR. TRUCK'S REVENGE — LEGENDARY MUSIC + SNIPPETS
+   Replace BOTH existing MENU MUSIC and CHASE MUSIC blocks.
+   ========================================================== */
+(() => {
+  const byId = (id) => document.getElementById(id);
+
+  const PREF_ENABLED = "mtr_legendary_music_enabled";
+  const PREF_CHASE = "mtr_legendary_chase_enabled";
+  const PREF_MOTIFS = "mtr_legendary_motifs_enabled";
+
+  let enabled = true;
+  let chaseEnabled = true;
+  let motifsEnabled = true;
+
+  try {
+    if (localStorage.getItem(PREF_ENABLED) !== null) {
+      enabled = localStorage.getItem(PREF_ENABLED) === "true";
+    }
+    if (localStorage.getItem(PREF_CHASE) !== null) {
+      chaseEnabled = localStorage.getItem(PREF_CHASE) === "true";
+    }
+    if (localStorage.getItem(PREF_MOTIFS) !== null) {
+      motifsEnabled = localStorage.getItem(PREF_MOTIFS) === "true";
+    }
+  } catch (e) {}
+
+  let ctx = null;
+  let master = null;
+  let musicBus = null;
+  let menuBus = null;
+  let chaseBus = null;
+  let motifBus = null;
+  let sfxBus = null;
+  let delay = null;
+  let noiseBuffer = null;
+
+  let timer = null;
+  let step = 0;
+  let nextTime = 0;
+  let mode = "off"; // off | menu | chase | gameover
+  let currentBPM = 118;
+
+  const stepDur = () => 60 / currentBPM / 4;
+  const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+  const lastMotif = {};
+  let uiMusic = null;
+  let uiChase = null;
+  let uiSnip = null;
+  let rawAchievement = null;
+
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREF_ENABLED, String(enabled));
+      localStorage.setItem(PREF_CHASE, String(chaseEnabled));
+      localStorage.setItem(PREF_MOTIFS, String(motifsEnabled));
+    } catch (e) {}
+  }
+
+  function isVisible(el) {
+    if (!el) return false;
+    const st = getComputedStyle(el);
+    return (
+      st.display !== "none" &&
+      st.visibility !== "hidden" &&
+      parseFloat(st.opacity) > 0.01
+    );
+  }
+
+  function isCountdownActive() {
+    const el = byId("mtr-countdown");
+    if (!el) return false;
+    return (
+      el.style.display === "flex" ||
+      getComputedStyle(el).display === "flex"
+    );
+  }
+
+  function canPlay(name, ms) {
+    const now = performance.now();
+    if (lastMotif[name] && now - lastMotif[name] < ms) return false;
+    lastMotif[name] = now;
+    return true;
+  }
+
+  function getState() {
+    try {
+      return {
+        active:
+          typeof gameActive !== "undefined"
+            ? gameActive
+            : window.__MTR?.gameActive || false,
+        speed:
+          typeof speed !== "undefined"
+            ? speed
+            : window.__MTR?.speed || 0,
+        truckActive:
+          typeof truck !== "undefined" && truck
+            ? !!truck.active
+            : window.__MTR?.truckActive || false,
+        playerZ:
+          typeof player !== "undefined" && player
+            ? player.z ?? player.group?.position?.z ?? 0
+            : 0,
+        truckZ:
+          typeof truck !== "undefined" && truck?.group
+            ? truck.group.position.z
+            : 0
+      };
+    } catch (e) {
+      return {
+        active: false,
+        speed: 0,
+        truckActive: false,
+        playerZ: 0,
+        truckZ: 0
+      };
+    }
+  }
+
+  function notify(msg) {
+    if (rawAchievement) {
+      rawAchievement(msg);
+    } else {
+      console.log(msg);
+    }
+  }
+
+  function makeNoise() {
+    const len = Math.floor(ctx.sampleRate * 1.0);
+    const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    return buffer;
+  }
+
+  function ensureAudio() {
+    if (ctx) return;
+
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+
+      ctx = new AC();
+
+      master = ctx.createGain();
+      master.gain.value = 0;
+
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -18;
+      comp.knee.value = 24;
+      comp.ratio.value = 6;
+
+      master.connect(comp);
+      comp.connect(ctx.destination);
+
+      musicBus = ctx.createGain();
+      musicBus.gain.value = 0.9;
+      musicBus.connect(master);
+
+      menuBus = ctx.createGain();
+      menuBus.gain.value = 0.78;
+      menuBus.connect(musicBus);
+
+      chaseBus = ctx.createGain();
+      chaseBus.gain.value = 0.88;
+      chaseBus.connect(musicBus);
+
+      motifBus = ctx.createGain();
+      motifBus.gain.value = 0.95;
+      motifBus.connect(master);
+
+      sfxBus = ctx.createGain();
+      sfxBus.gain.value = 0.85;
+      sfxBus.connect(master);
+
+      delay = ctx.createDelay(1.0);
+      delay.delayTime.value = 0.29;
+
+      const fb = ctx.createGain();
+      fb.gain.value = 0.18;
+
+      const damp = ctx.createBiquadFilter();
+      damp.type = "lowpass";
+      damp.frequency.value = 2600;
+
+      delay.connect(damp);
+      damp.connect(fb);
+      fb.connect(delay);
+      delay.connect(master);
+
+      noiseBuffer = makeNoise();
+    } catch (e) {
+      ctx = null;
+    }
+  }
+
+  function voice(bus, type, midi, t, dur, gain, opts = {}) {
+    if (!ctx || !bus) return;
+
+    const o = ctx.createOscillator();
+    o.type = type;
+    o.frequency.value = midiHz(midi);
+
+    if (opts.detune) {
+      o.detune.value = opts.detune;
+    }
+
+    const g = ctx.createGain();
+    const attack = opts.attack == null ? 0.006 : opts.attack;
+
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    let out = o;
+
+    if (opts.filter) {
+      const f = ctx.createBiquadFilter();
+      f.type = opts.filterType || "lowpass";
+      f.frequency.value = opts.filter;
+      f.Q.value = opts.q == null ? 1 : opts.q;
+      o.connect(f);
+      f.connect(g);
+      out = f;
+    } else {
+      o.connect(g);
+    }
+
+    g.connect(bus);
+
+    if (opts.delay && delay) {
+      g.connect(delay);
+    }
+
+    o.start(t);
+    o.stop(t + dur + (opts.release == null ? 0.08 : opts.release));
+  }
+
+  function pad(bus, midis, t, dur, gain = 0.04) {
+    if (!ctx || !bus) return;
+    const per = Math.max(0.008, gain / Math.max(1, midis.length));
+    midis.forEach((m, i) => {
+      voice(bus, "sawtooth", m, t, dur, per, {
+        attack: 0.12,
+        release: 0.25,
+        filter: 1250,
+        q: 0.7,
+        detune: (i - midis.length / 2) * 5 + Math.random() * 4 - 2
+      });
+    });
+  }
+
+  function noiseHit(
+    bus,
+    t,
+    dur,
+    gain,
+    filterType = "bandpass",
+    freq = 1000,
+    q = 1
+  ) {
+    if (!ctx || !bus || !noiseBuffer) return;
+
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+
+    const f = ctx.createBiquadFilter();
+    f.type = filterType;
+    f.frequency.value = freq;
+    f.Q.value = q;
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    src.connect(f);
+    f.connect(g);
+    g.connect(bus);
+
+    src.start(t);
+    src.stop(t + dur + 0.05);
+  }
+
+  function kick(bus, t, dark = false) {
+    if (!ctx || !bus) return;
+
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+
+    o.type = "sine";
+    o.frequency.setValueAtTime(dark ? 150 : 165, t);
+    o.frequency.exponentialRampToValueAtTime(dark ? 34 : 45, t + 0.12);
+
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(dark ? 0.95 : 0.8, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + (dark ? 0.3 : 0.23));
+
+    o.connect(g);
+    g.connect(bus);
+
+    o.start(t);
+    o.stop(t + 0.35);
+  }
+
+  function snare(bus, t, dark = false) {
+    noiseHit(
+      bus,
+      t,
+      dark ? 0.22 : 0.18,
+      dark ? 0.35 : 0.28,
+      "bandpass",
+      dark ? 1200 : 1900,
+      dark ? 1.1 : 0.8
+    );
+
+    voice(bus, "triangle", dark ? 140 : 195, t, 0.12, dark ? 0.16 : 0.12);
+  }
+
+  function hat(bus, t, open = false, dark = false) {
+    noiseHit(
+      bus,
+      t,
+      open ? (dark ? 0.12 : 0.14) : dark ? 0.03 : 0.035,
+      open ? 0.1 : 0.06,
+      "highpass",
+      dark ? 5200 : 7200,
+      0.7
+    );
+  }
+
+  function bassNote(bus, midi, t, dark = false) {
+    voice(bus, "sawtooth", midi, t, dark ? 0.24 : 0.2, dark ? 0.22 : 0.16, {
+      filter: dark ? 520 : 720,
+      q: dark ? 8 : 5
+    });
+
+    if (dark) {
+      voice(bus, "sine", midi - 12, t, 0.26, 0.1);
+    }
+  }
+
+  function leadNote(bus, midi, t, dark = false) {
+    voice(bus, "square", midi, t, dark ? 0.22 : 0.17, dark ? 0.08 : 0.1, {
+      filter: dark ? 1500 : 2600,
+      q: 1
+    });
+
+    voice(
+      bus,
+      "sawtooth",
+      midi + (dark ? -12 : 12),
+      t,
+      dark ? 0.22 : 0.17,
+      dark ? 0.04 : 0.05,
+      {
+        filter: dark ? 1200 : 2200,
+        q: 0.8
+      }
+    );
+  }
+
+  function riser(bus, t, dur, from, to, gain = 0.1) {
+    if (!ctx || !bus) return;
+
+    const o = ctx.createOscillator();
+    o.type = "sawtooth";
+    o.frequency.setValueAtTime(Math.max(20, from), t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, to), t + dur);
+
+    const f = ctx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.setValueAtTime(400, t);
+    f.frequency.exponentialRampToValueAtTime(3200, t + dur);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + dur * 0.7);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    o.connect(f);
+    f.connect(g);
+    g.connect(bus);
+
+    o.start(t);
+    o.stop(t + dur + 0.05);
+  }
+
+  function heartbeat(bus, t) {
+    voice(bus, "sine", 34, t, 0.24, 0.22);
+    voice(bus, "sine", 34, t + 0.28, 0.18, 0.2);
+  }
+
+  function truckPulse(bus, t) {
+    noiseHit(bus, t, 0.3, 0.12, "lowpass", 300, 1);
+  }
+
+  /* ---------------------------------------------------------
+     MUSICAL DATA
+     --------------------------------------------------------- */
+
+  const MENU_CHORDS = [
+    { root: 45, notes: [57, 60, 64] }, // Am
+    { root: 41, notes: [53, 57, 60] }, // F
+    { root: 48, notes: [55, 60, 64] }, // C
+    { root: 43, notes: [55, 59, 62] }  // G
+  ];
+
+  const MENU_HOOK = [
+    69, 0, 72, 0, 76, 0, 72, 0,
+    69, 0, 72, 76, 79, 0, 76, 0,
+    77, 0, 76, 0, 74, 0, 72, 0,
+    74, 76, 77, 0, 81, 0, 77, 0,
+    76, 0, 74, 0, 72, 0, 76, 0,
+    79, 0, 76, 0, 74, 0, 72, 0,
+    74, 0, 76, 0, 79, 0, 77, 0,
+    76, 74, 71, 0, 69, 0, 0, 0
+  ];
+
+  const CHASE_ROOTS = [38, 34, 41, 36]; // D, Bb, F, C
+  const CHASE_LEAD = [
+    62, 0, 65, 0, 69, 0, 65, 0,
+    62, 0, 65, 69, 72, 0, 69, 0,
+    70, 0, 69, 0, 67, 0, 65, 0,
+    67, 69, 70, 0, 72, 0, 70, 0,
+    65, 0, 69, 0, 72, 0, 69, 0,
+    65, 0, 69, 72, 74, 0, 72, 0,
+    67, 0, 69, 0, 72, 0, 69, 0,
+    67, 69, 70, 0, 72, 0, 0, 0
+  ];
+
+  const TRUCK_ROOTS = [38, 39, 38, 37];
+  const TRUCK_LEAD = [
+    74, 0, 75, 0, 74, 0, 70, 0,
+    74, 0, 75, 74, 70, 0, 69, 0,
+    75, 0, 74, 0, 70, 0, 69, 0,
+    75, 0, 74, 0, 70, 0, 69, 0,
+    74, 0, 75, 0, 77, 0, 75, 0,
+    74, 0, 75, 77, 79, 0, 77, 0,
+    75, 0, 74, 0, 70, 0, 69, 0,
+    74, 75, 70, 0, 69, 0, 0, 0
+  ];
+
+  /* ---------------------------------------------------------
+     SEQUENCERS
+     --------------------------------------------------------- */
+
+  function scheduleMenu(s, t) {
+    const bar = Math.floor(s / 16) % 4;
+    const chord = MENU_CHORDS[bar];
+    const sb = s % 16;
+
+    if (sb === 0) {
+      pad(menuBus, chord.notes, t, stepDur() * 16, 0.05);
+    }
+
+    if (s % 4 === 0) kick(menuBus, t, false);
+    if (s % 8 === 4) snare(menuBus, t, false);
+    if (s % 2 === 0) hat(menuBus, t, s % 4 === 2, false);
+
+    let bassMidi = 0;
+    if (sb % 4 === 0) bassMidi = chord.root - 12;
+    else if (sb % 4 === 2) bassMidi = chord.root;
+    else if (sb === 7) bassMidi = chord.root + 7;
+
+    if (bassMidi) {
+      bassNote(menuBus, bassMidi, t, false);
+    }
+
+    const arp = chord.notes[s % chord.notes.length] + 12;
+    voice(menuBus, "triangle", arp, t, 0.14, 0.04, {
+      filter: 3200,
+      q: 0.7,
+      delay: true
+    });
+
+    const hook = MENU_HOOK[s % MENU_HOOK.length];
+    if (hook) {
+      leadNote(menuBus, hook, t, false);
+    }
+
+    if (motifsEnabled && s === 0 && bar === 0 && Math.random() < 0.35) {
+      if (canPlay("title", 12000)) {
+        titleSnippet(t + 0.02);
+      }
+    }
+  }
+
+  function scheduleChase(s, t) {
+    const st = getState();
+
+    const dark = st.truckActive;
+    const speedNorm = Math.min(1, (st.speed || 0) / 150);
+    const dist = dark ? Math.abs(st.playerZ - st.truckZ) : 9999;
+
+    const bar = Math.floor(s / 16) % 4;
+    const roots = dark ? TRUCK_ROOTS : CHASE_ROOTS;
+    const root = roots[bar];
+    const sb = s % 16;
+
+    if (dark && sb === 0) {
+      pad(chaseBus, [root + 12, root + 15, root + 18], t, stepDur() * 16, 0.045);
+    }
+
+    if (!dark && sb === 0) {
+      pad(chaseBus, [root + 12, root + 15, root + 19], t, stepDur() * 16, 0.04);
+    }
+
+    if (s % 4 === 0 || (dark && s % 16 === 14)) {
+      kick(chaseBus, t, dark);
+    }
+
+    if (s % 8 === 4 || (dark && s % 16 === 10)) {
+      snare(chaseBus, t, dark);
+    }
+
+    if (dark) {
+      hat(chaseBus, t, s % 4 === 2, true);
+    } else if (s % 2 === 0) {
+      hat(chaseBus, t, s % 4 === 2, false);
+    }
+
+    let bassMidi = 0;
+
+    if (dark) {
+      if (sb % 2 === 0) bassMidi = root;
+      if (sb === 3 || sb === 11) bassMidi = root + 1;
+      if (sb === 14) bassMidi = root - 12;
+    } else {
+      if (sb % 4 === 0) bassMidi = root;
+      else if (sb % 4 === 2) bassMidi = root + 12;
+      else if (sb === 7) bassMidi = root + 7;
+    }
+
+    if (bassMidi) {
+      bassNote(chaseBus, bassMidi, t, dark);
+    }
+
+    const leadArr = dark ? TRUCK_LEAD : CHASE_LEAD;
+    const note = leadArr[s % leadArr.length];
+
+    if (note && (dark || speedNorm > 0.3)) {
+      leadNote(chaseBus, note, t, dark);
+    }
+
+    if (!dark && speedNorm > 0.65 && s % 2 === 1) {
+      voice(chaseBus, "triangle", root + 24 + (s % 5), t, 0.1, 0.028, {
+        filter: 4200,
+        q: 0.7
+      });
+    }
+
+    if (dark && dist < 220 && s % 8 === 0) {
+      heartbeat(chaseBus, t);
+    }
+
+    if (dark && s === 0 && Math.random() < 0.5) {
+      truckPulse(chaseBus, t);
+    }
+  }
+
+  function scheduleGameOver(s, t) {
+    if (s % 32 === 0) {
+      pad(menuBus, [50, 53, 57, 62], t, stepDur() * 32, 0.05);
+    }
+
+    if (s % 16 === 8) {
+      voice(menuBus, "sine", 38, t, 0.5, 0.12);
+    }
+
+    if (motifsEnabled && s === 0 && Math.random() < 0.35) {
+      if (canPlay("gameoverDesc", 8000)) {
+        descendingMotif(t + 0.05);
+      }
+    }
+  }
+
+  function scheduleStep(s, t) {
+    if (mode === "menu") scheduleMenu(s, t);
+    else if (mode === "chase") scheduleChase(s, t);
+    else if (mode === "gameover") scheduleGameOver(s, t);
+  }
+
+  function scheduler() {
+    if (!ctx || ctx.state !== "running") return;
+
+    if (nextTime < ctx.currentTime - 0.1) {
+      nextTime = ctx.currentTime + 0.05;
+    }
+
+    while (nextTime < ctx.currentTime + 0.12) {
+      scheduleStep(step, nextTime);
+      nextTime += stepDur();
+      step = (step + 1) % 64;
+    }
+  }
+
+  function startScheduler() {
+    if (timer) return;
+    timer = setInterval(scheduler, 25);
+  }
+
+  function stopScheduler() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  function getDesiredMode() {
+    if (!enabled) return "off";
+    if (document.hidden) return "off";
+
+    const boss = byId("edu-overlay");
+    if (isVisible(boss)) return "off";
+
+    const st = getState();
+
+    if (st.active || isCountdownActive()) {
+      return chaseEnabled ? "chase" : "off";
+    }
+
+    const over = byId("game-over");
+    if (isVisible(over)) return "gameover";
+
+    const menu = byId("menu");
+    const shop = byId("shop-panel");
+    const settings = byId("settings-panel");
+
+    if (
+      isVisible(menu) ||
+      (shop && shop.classList.contains("active")) ||
+      (settings && settings.classList.contains("active"))
+    ) {
+      return "menu";
+    }
+
+    return "off";
+  }
+
+  function setMode(m) {
+    if (mode === m) return;
+
+    mode = m;
+
+    if (m === "off") {
+      stopScheduler();
+      if (ctx && master) {
+        master.gain.setTargetAtTime(0, ctx.currentTime, 0.12);
+      }
+      return;
+    }
+
+    ensureAudio();
+    if (!ctx) return;
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+
+    currentBPM = m === "menu" ? 118 : m === "chase" ? 142 : 68;
+
+    step = 0;
+    nextTime = ctx.currentTime + 0.08;
+
+    startScheduler();
+
+    master.gain.setTargetAtTime(0.26, ctx.currentTime, 0.15);
+
+    if (m === "chase") playMotif("chaseStart");
+    if (m === "menu") playMotif("menuStart");
+  }
+
+  /* ---------------------------------------------------------
+     LEGENDARY SNIPPETS / MOTIFS
+     --------------------------------------------------------- */
+
+  function titleSnippet(t) {
+    [69, 76, 81, 88, 93].forEach((m, i) => {
+      voice(motifBus, "square", m, t + i * 0.09, 0.16, 0.07, {
+        filter: 3000,
+        q: 0.8,
+        delay: true
+      });
+    });
+
+    pad(motifBus, [69, 72, 76, 81], t + 0.42, 0.7, 0.06);
+  }
+
+  function menuStart(t) {
+    [69, 72, 76, 81].forEach((m, i) => {
+      voice(menuBus, "triangle", m, t + i * 0.06, 0.14, 0.06, {
+        filter: 3200,
+        delay: true
+      });
+    });
+  }
+
+  function chaseStart(t) {
+    riser(chaseBus, t, 0.45, 70, 280, 0.1);
+    kick(chaseBus, t + 0.48, true);
+  }
+
+  function countdownMotif(t) {
+    [76, 76, 76].forEach((m, i) => {
+      voice(motifBus, "square", m, t + i * 0.7, 0.12, 0.08);
+    });
+
+    riser(motifBus, t + 1.6, 0.5, 200, 800, 0.08);
+
+    pad(motifBus, [69, 76, 81, 88], t + 2.1, 0.9, 0.09);
+  }
+
+  function nitroMotif(t) {
+    riser(sfxBus, t, 0.35, 220, 880, 0.08);
+    voice(sfxBus, "sawtooth", 45, t, 0.3, 0.06, {
+      filter: 800,
+      q: 4
+    });
+  }
+
+  function nearMissMotif(t) {
+    voice(motifBus, "triangle", 88, t, 0.12, 0.07, { delay: true });
+    voice(motifBus, "triangle", 93, t + 0.06, 0.14, 0.06, { delay: true });
+    noiseHit(sfxBus, t, 0.18, 0.05, "highpass", 5000, 0.7);
+  }
+
+  function crashMotif(t) {
+    noiseHit(sfxBus, t, 0.35, 0.2, "lowpass", 700, 0.8);
+    voice(sfxBus, "sine", 60, t, 0.4, 0.2);
+    voice(sfxBus, "sine", 40, t + 0.02, 0.45, 0.18);
+  }
+
+  function truckMotif(t) {
+    voice(motifBus, "sawtooth", 38, t, 1.0, 0.1, {
+      filter: 700,
+      q: 3
+    });
+
+    voice(motifBus, "sawtooth", 44, t, 1.0, 0.1, {
+      filter: 700,
+      q: 3
+    });
+
+    riser(sfxBus, t, 0.8, 80, 30, 0.12);
+    noiseHit(sfxBus, t, 0.5, 0.18, "lowpass", 400, 1);
+  }
+
+  function wreckedMotif(t) {
+    [62, 60, 57, 50].forEach((m, i) => {
+      voice(motifBus, "sawtooth", m, t + i * 0.24, 0.5, 0.08, {
+        filter: 1200,
+        q: 0.8
+      });
+    });
+
+    pad(motifBus, [38, 50, 53], t + 1.0, 1.4, 0.06);
+  }
+
+  function descendingMotif(t) {
+    [62, 60, 57, 50].forEach((m, i) => {
+      voice(menuBus, "sawtooth", m, t + i * 0.28, 0.55, 0.05, {
+        filter: 1000,
+        q: 0.7
+      });
+    });
+  }
+
+  function achievementMotif(t) {
+    [76, 79, 81].forEach((m, i) => {
+      voice(motifBus, "square", m, t + i * 0.07, 0.12, 0.06, {
+        filter: 3500,
+        q: 0.7,
+        delay: true
+      });
+    });
+  }
+
+  function shopMotif(t) {
+    [81, 88, 93].forEach((m, i) => {
+      voice(motifBus, "triangle", m, t + i * 0.06, 0.12, 0.07, {
+        filter: 4000,
+        delay: true
+      });
+    });
+  }
+
+  function upgradeMotif(t) {
+    [60, 64, 67, 72, 76, 79, 84].forEach((m, i) => {
+      voice(motifBus, "square", m, t + i * 0.055, 0.12, 0.06, {
+        filter: 3200,
+        q: 0.8,
+        delay: true
+      });
+    });
+
+    riser(motifBus, t, 0.45, 300, 1200, 0.07);
+  }
+
+  function playMotif(name) {
+    if (!enabled || !motifsEnabled) return;
+
+    ensureAudio();
+    if (!ctx) return;
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+
+    const t = ctx.currentTime + 0.01;
+
+    switch (name) {
+      case "title":
+        if (!canPlay("title", 12000)) return;
+        titleSnippet(t);
+        break;
+
+      case "menuStart":
+        if (!canPlay("menuStart", 2500)) return;
+        menuStart(t);
+        break;
+
+      case "chaseStart":
+        if (!canPlay("chaseStart", 2500)) return;
+        chaseStart(t);
+        break;
+
+      case "countdown":
+        if (!canPlay("countdown", 3000)) return;
+        countdownMotif(t);
+        break;
+
+      case "nitro":
+        if (!canPlay("nitro", 300)) return;
+        nitroMotif(t);
+        break;
+
+      case "nearMiss":
+        if (!canPlay("nearMiss", 350)) return;
+        nearMissMotif(t);
+        break;
+
+      case "crash":
+        if (!canPlay("crash", 180)) return;
+        crashMotif(t);
+        break;
+
+      case "truck":
+        if (!canPlay("truck", 5000)) return;
+        truckMotif(t);
+        break;
+
+      case "wrecked":
+        if (!canPlay("wrecked", 1200)) return;
+        wreckedMotif(t);
+        break;
+
+      case "achievement":
+        if (!canPlay("achievement", 700)) return;
+        achievementMotif(t);
+        break;
+
+      case "shop":
+        if (!canPlay("shop", 500)) return;
+        shopMotif(t);
+        break;
+
+      case "upgrade":
+        if (!canPlay("upgrade", 350)) return;
+        upgradeMotif(t);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  function motifFromAchievement(msg) {
+    if (!motifsEnabled) return;
+
+    const m = String(msg || "").toUpperCase();
+
+    if (m.includes("NEAR MISS")) {
+      playMotif("nearMiss");
+    } else if (m.includes("COMBO")) {
+      playMotif("achievement");
+    } else if (
+      m.includes("UNLOCK") ||
+      m.includes("EQUIP") ||
+      m.includes("INSTALLED")
+    ) {
+      playMotif("upgrade");
+    } else if (m.includes("MR. TRUCK")) {
+      playMotif("truck");
+    } else if (m.includes("FINAL SCORE") || m.includes("WRECKED")) {
+      // handled by endGame motif
+    } else if (m.includes("GO!")) {
+      // handled by countdown motif
+    } else {
+      if (canPlay("uiAchievement", 900)) {
+        playMotif("achievement");
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------
+     HOOK INTO GAME EVENTS
+     --------------------------------------------------------- */
+
+  rawAchievement =
+    typeof showAchievement === "function" ? showAchievement : null;
+
+  if (typeof showAchievement === "function") {
+    showAchievement = function (msg) {
+      rawAchievement(msg);
+      try {
+        motifFromAchievement(msg);
+      } catch (e) {}
+    };
+  }
+
+  if (typeof startGame === "function") {
+    const _startGame = startGame;
+    startGame = function () {
+      const wasCounting = isCountdownActive();
+      _startGame();
+
+      if (!wasCounting) {
+        if (isCountdownActive()) {
+          playMotif("countdown");
+        } else {
+          playMotif("chaseStart");
+        }
+      }
+    };
+  }
+
+  if (typeof hitPlayer === "function") {
+    const _hitPlayer = hitPlayer;
+    hitPlayer = function () {
+      if (!isCountdownActive()) {
+        const fatal = typeof lives !== "undefined" && lives <= 1;
+        if (!fatal) {
+          playMotif("crash");
+        }
+      }
+      _hitPlayer();
+    };
+  }
+
+  if (typeof endGame === "function") {
+    const _endGame = endGame;
+    endGame = function () {
+      const before = isVisible(byId("game-over"));
+      _endGame();
+      const after = isVisible(byId("game-over"));
+
+      if (!before && after) {
+        playMotif("wrecked");
+      }
+    };
+  }
+
+  if (typeof activateTruck === "function") {
+    const _activateTruck = activateTruck;
+    activateTruck = function () {
+      _activateTruck();
+
+      if (typeof truck !== "undefined" && truck && truck.active) {
+        playMotif("truck");
+      }
+    };
+  }
+
+  if (typeof openShop === "function") {
+    const _openShop = openShop;
+    openShop = function () {
+      _openShop();
+      playMotif("shop");
+    };
+  }
+
+  if (typeof claimUpgrade === "function") {
+    const _claimUpgrade = claimUpgrade;
+    claimUpgrade = function (u) {
+      const before =
+        typeof UPGRADES !== "undefined" && UPGRADES[u]
+          ? !!UPGRADES[u].claimed
+          : false;
+
+      _claimUpgrade(u);
+
+      const after =
+        typeof UPGRADES !== "undefined" && UPGRADES[u]
+          ? !!UPGRADES[u].claimed
+          : false;
+
+      if (!before && after) {
+        playMotif("upgrade");
+      }
+    };
+  }
+
+  /* ---------------------------------------------------------
+     TOGGLES + UI
+     --------------------------------------------------------- */
+
+  function toggleEnabled() {
+    enabled = !enabled;
+    savePrefs();
+
+    if (enabled) {
+      ensureAudio();
+      mode = "off";
+      setMode(getDesiredMode());
+      notify("LEGENDARY MUSIC ON");
+    } else {
+      setMode("off");
+      notify("LEGENDARY MUSIC OFF");
+    }
+
+    updateButtons();
+  }
+
+  function toggleChase() {
+    chaseEnabled = !chaseEnabled;
+    savePrefs();
+
+    if (chaseEnabled) {
+      if (getDesiredMode() === "chase") {
+        setMode("chase");
+      }
+      notify("CHASE MUSIC ON");
+    } else {
+      if (mode === "chase") {
+        setMode("off");
+      }
+      notify("CHASE MUSIC OFF");
+    }
+
+    updateButtons();
+  }
+
+  function toggleMotifs() {
+    motifsEnabled = !motifsEnabled;
+    savePrefs();
+    notify("SNIPPETS " + (motifsEnabled ? "ON" : "OFF"));
+    updateButtons();
+  }
+
+  function updateButtons() {
+    if (uiMusic) {
+      uiMusic.textContent = enabled ? "🎵 Legend: ON" : "🎵 Legend: OFF";
+    }
+
+    if (uiChase) {
+      uiChase.textContent = chaseEnabled ? "🎸 Chase: ON" : "🎸 Chase: OFF";
+    }
+
+    if (uiSnip) {
+      uiSnip.textContent = motifsEnabled ? "🎼 Snippet" : "🎼 Snippets OFF";
+    }
+  }
+
+  function addButtons(attempt = 0) {
+    if (attempt > 30) return;
+
+    const host = document.querySelector("#mtr-qol .mtr-qol-btns");
+
+    if (!host) {
+      setTimeout(() => addButtons(attempt + 1), 400);
+      return;
+    }
+
+    if (!byId("mtr-legend-music-btn")) {
+      uiMusic = document.createElement("button");
+      uiMusic.id = "mtr-legend-music-btn";
+      uiMusic.type = "button";
+      uiMusic.className = "mtr-mini";
+      uiMusic.textContent = "🎵 Legend";
+      uiMusic.onclick = toggleEnabled;
+      host.appendChild(uiMusic);
+    }
+
+    if (!byId("mtr-legend-chase-btn")) {
+      uiChase = document.createElement("button");
+      uiChase.id = "mtr-legend-chase-btn";
+      uiChase.type = "button";
+      uiChase.className = "mtr-mini";
+      uiChase.textContent = "🎸 Chase";
+      uiChase.onclick = toggleChase;
+      host.appendChild(uiChase);
+    }
+
+    if (!byId("mtr-legend-snippet-btn")) {
+      uiSnip = document.createElement("button");
+      uiSnip.id = "mtr-legend-snippet-btn";
+      uiSnip.type = "button";
+      uiSnip.className = "mtr-mini";
+      uiSnip.textContent = "🎼 Snippet";
+      uiSnip.onclick = () => {
+        if (!motifsEnabled) {
+          motifsEnabled = true;
+          savePrefs();
+          updateButtons();
+        }
+        playMotif("title");
+      };
+      host.appendChild(uiSnip);
+    }
+
+    updateButtons();
+  }
+
+  /* ---------------------------------------------------------
+     INPUT + AUTOPLAY UNLOCK
+     --------------------------------------------------------- */
+
+  function unlock() {
+    ensureAudio();
+
+    if (ctx && ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+
+    if (ctx && ctx.state === "running" && mode !== "off") {
+      nextTime = Math.max(nextTime, ctx.currentTime + 0.05);
+    }
+  }
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "KeyY" && !e.repeat) {
+      toggleEnabled();
+    } else if (e.code === "KeyV" && !e.repeat) {
+      toggleChase();
+    } else if (e.code === "KeyB" && !e.repeat) {
+      toggleMotifs();
+    } else if (e.code === "KeyL" && !e.repeat) {
+      const choices = ["title", "truck", "upgrade", "nearMiss", "shop"];
+      playMotif(choices[Math.floor(Math.random() * choices.length)]);
+    } else if (e.code === "Space" && !e.repeat) {
+      const st = getState();
+      if (st.active && !isCountdownActive()) {
+        playMotif("nitro");
+      }
+    }
+  });
+
+  window.addEventListener("keydown", unlock);
+  window.addEventListener("pointerdown", unlock);
+
+  /* ---------------------------------------------------------
+     MAIN STATE LOOP
+     --------------------------------------------------------- */
+
+  setInterval(() => {
+    if (!enabled) {
+      if (mode !== "off") setMode("off");
+      return;
+    }
+
+    const desired = getDesiredMode();
+
+    if (desired !== mode) {
+      setMode(desired);
+    }
+
+    if (ctx && ctx.state === "suspended" && desired !== "off") {
+      ctx.resume().catch(() => {});
+    }
+  }, 200);
+
+  setTimeout(() => addButtons(0), 400);
+})();
+/* ==========================================================
+MR. TRUCK'S REVENGE — KNIPS INTRO MUSIC
+Sneaky IT-office synthwave for the LanSchool intro.
+Fully self-contained — no edits to existing blocks needed.
+Toggle: I  |  Reacts to the cinematic:
+1) terminal typing  2) Knips popup  3) ALLOWED stamp slam
+========================================================== */
+(() => {
+const byId = (id) => document.getElementById(id);
+const PREF = "mtr_knips_music_enabled";
+
+let enabled = true;
+try {
+if (localStorage.getItem(PREF) !== null) {
+enabled = localStorage.getItem(PREF) === "true";
+}
+} catch (e) {}
+
+let ctx = null;
+let master = null;
+let musicBus = null;
+let motifBus = null;
+let noiseBuffer = null;
+let delay = null;
+
+let timer = null;
+let step = 0;
+let nextTime = 0;
+
+const BPM = 104;
+const STEP = 60 / BPM / 4;
+
+// 0 = terminal typing, 1 = Knips arrived, 2 = ALLOWED (victory)
+let phase = 0;
+let wasPopup = false;
+let wasAllowed = false;
+let uiBtn = null;
+
+const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+function savePref() {
+try {
+localStorage.setItem(PREF, String(enabled));
+} catch (e) {}
+}
+
+function introVisible() {
+const el = byId("intro-screen");
+if (!el) return false;
+const st = getComputedStyle(el);
+return (
+st.display !== "none" &&
+parseFloat(st.opacity) > 0.05 &&
+!el.classList.contains("fade-out")
+);
+}
+
+/* ---------- audio setup ---------- */
+
+function makeNoise() {
+const len = Math.floor(ctx.sampleRate * 1.0);
+const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+const data = buffer.getChannelData(0);
+for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+return buffer;
+}
+
+function ensureAudio() {
+if (ctx) return;
+try {
+const AC = window.AudioContext || window.webkitAudioContext;
+if (!AC) return;
+ctx = new AC();
+master = ctx.createGain();
+master.gain.value = 0;
+const comp = ctx.createDynamicsCompressor();
+comp.threshold.value = -18;
+comp.knee.value = 24;
+comp.ratio.value = 6;
+master.connect(comp);
+comp.connect(ctx.destination);
+musicBus = ctx.createGain();
+musicBus.gain.value = 0.85;
+musicBus.connect(master);
+motifBus = ctx.createGain();
+motifBus.gain.value = 0.95;
+motifBus.connect(master);
+delay = ctx.createDelay(1.0);
+delay.delayTime.value = STEP * 3;
+const fb = ctx.createGain();
+fb.gain.value = 0.2;
+const damp = ctx.createBiquadFilter();
+damp.type = "lowpass";
+damp.frequency.value = 2400;
+delay.connect(damp);
+damp.connect(fb);
+fb.connect(delay);
+delay.connect(master);
+noiseBuffer = makeNoise();
+} catch (e) {
+ctx = null;
+}
+}
+
+/* ---------- instruments ---------- */
+
+function voice(bus, type, midi, t, dur, gain, opts = {}) {
+if (!ctx || !bus) return;
+const o = ctx.createOscillator();
+o.type = type;
+o.frequency.value = midiHz(midi);
+if (opts.detune) o.detune.value = opts.detune;
+const g = ctx.createGain();
+const attack = opts.attack == null ? 0.006 : opts.attack;
+g.gain.setValueAtTime(0.0001, t);
+g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + attack);
+g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+if (opts.filter) {
+const f = ctx.createBiquadFilter();
+f.type = opts.filterType || "lowpass";
+f.frequency.value = opts.filter;
+f.Q.value = opts.q == null ? 1 : opts.q;
+o.connect(f);
+f.connect(g);
+} else {
+o.connect(g);
+}
+g.connect(bus);
+if (opts.delay && delay) g.connect(delay);
+o.start(t);
+o.stop(t + dur + (opts.release == null ? 0.08 : opts.release));
+}
+
+function noiseHit(bus, t, dur, gain, filterType = "bandpass", freq = 1000, q = 1) {
+if (!ctx || !bus || !noiseBuffer) return;
+const src = ctx.createBufferSource();
+src.buffer = noiseBuffer;
+const f = ctx.createBiquadFilter();
+f.type = filterType;
+f.frequency.value = freq;
+f.Q.value = q;
+const g = ctx.createGain();
+g.gain.setValueAtTime(0.0001, t);
+g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + 0.004);
+g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+src.connect(f);
+f.connect(g);
+g.connect(bus);
+src.start(t);
+src.stop(t + dur + 0.05);
+}
+
+// Typewriter clack — the heartbeat of the intro
+function typeTick(t, accent) {
+noiseHit(
+musicBus, t, 0.025, accent ? 0.05 : 0.028,
+"highpass", 4200 + Math.random() * 1800, 0.8
+);
+}
+
+// Carriage-return ding at the end of every phrase
+function bell(t) {
+voice(musicBus, "triangle", 91, t, 0.5, 0.07, { delay: true });
+voice(musicBus, "sine", 91, t, 0.7, 0.05);
+}
+
+function kick(t) {
+const o = ctx.createOscillator();
+const g = ctx.createGain();
+o.type = "sine";
+o.frequency.setValueAtTime(130, t);
+o.frequency.exponentialRampToValueAtTime(44, t + 0.1);
+g.gain.setValueAtTime(0.0001, t);
+g.gain.exponentialRampToValueAtTime(0.6, t + 0.005);
+g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+o.connect(g);
+g.connect(musicBus);
+o.start(t);
+o.stop(t + 0.25);
+}
+
+function rim(t) {
+noiseHit(musicBus, t, 0.06, 0.12, "bandpass", 1600, 1.4);
+voice(musicBus, "square", 82, t, 0.05, 0.04, { filter: 1200 });
+}
+
+// Sneaky pizzicato bass
+function pizz(t, midi) {
+voice(musicBus, "triangle", midi, t, 0.16, 0.16, { filter: 900, q: 2 });
+voice(musicBus, "sawtooth", midi - 12, t, 0.14, 0.07, { filter: 500 });
+}
+
+// CRT hum pad
+function hum(t, midi) {
+const dur = STEP * 16;
+[-4, 4].forEach((det) => {
+voice(musicBus, "sawtooth", midi, t, dur, 0.018, {
+attack: 0.4,
+filter: 420,
+q: 0.6,
+detune: det
+});
+});
+}
+
+function lead(t, midi) {
+voice(musicBus, "square", midi, t, 0.16, 0.075, { filter: 2400, q: 1, delay: true });
+voice(musicBus, "sawtooth", midi + 12, t, 0.14, 0.03, { filter: 2000 });
+}
+
+// Dial-up handshake chirps — it's LanSchool, after all
+function modem(t) {
+for (let i = 0; i < 8; i++) {
+voice(musicBus, "square", i % 2 === 0 ? 81 : 88, t + i * 0.045, 0.035, 0.022, {
+filter: 3000
+});
+}
+}
+
+/* ---------- musical data ---------- */
+
+// Sneaky descending bass: Am -> G -> F -> E
+const BASS_ROOTS = [45, 43, 41, 40];
+
+const KNIPS_LEAD = [
+76, 0, 81, 0, 79, 0, 76, 0, 77, 0, 79, 0, 81, 0, 79, 77,
+74, 0, 77, 0, 74, 0, 72, 0, 71, 0, 72, 0, 74, 0, 71, 0,
+69, 0, 72, 0, 76, 0, 72, 0, 69, 0, 71, 0, 72, 71, 69, 68,
+64, 0, 68, 0, 69, 0, 72, 0, 76, 0, 75, 74, 72, 0, 69, 0
+];
+
+// Victory variation after ALLOWED: heroic lift
+const VICTORY_BASS = [45, 41, 48, 43]; // Am -> F -> C -> G
+
+const VICTORY_LEAD = [
+81, 0, 85, 0, 88, 0, 85, 0, 81, 0, 85, 88, 92, 0, 88, 0,
+79, 0, 83, 0, 86, 0, 83, 0, 79, 0, 83, 86, 90, 0, 86, 0,
+81, 0, 85, 0, 88, 0, 85, 0, 81, 0, 85, 0, 88, 0, 92, 0,
+88, 0, 85, 0, 81, 0, 76, 0, 81, 85, 88, 0, 92, 0, 0, 0
+];
+
+/* ---------- sequencer ---------- */
+
+function scheduleIntro(s, t) {
+const bar = Math.floor(s / 16) % 4;
+const sb = s % 16;
+const victory = phase >= 2;
+const roots = victory ? VICTORY_BASS : BASS_ROOTS;
+const root = roots[bar];
+
+// Typewriter ticks — always on, that's the whole vibe
+if (phase >= 1 || s % 2 === 0) {
+typeTick(t, sb % 4 === 0);
+}
+
+// Sparse sneaky pulse before Knips pops up
+if (phase === 0 && (sb === 0 || sb === 8)) pizz(t, root);
+
+// Carriage-return bell ends every 4-bar phrase
+if (s === 62) bell(t);
+
+// CRT hum at each bar
+if (sb === 0) hum(t, root + 12);
+
+if (phase >= 1) {
+if (sb === 0 || sb === 8) kick(t);
+if (sb === 4 || sb === 12) rim(t);
+
+if (sb % 4 === 0) pizz(t, root);
+else if (sb % 4 === 2) pizz(t, root + 12);
+else if (sb === 7) pizz(t, root + 7);
+else if (sb === 15) pizz(t, root - 1); // chromatic approach
+
+const leadArr = victory ? VICTORY_LEAD : KNIPS_LEAD;
+const note = leadArr[s % leadArr.length];
+if (note) lead(t, note);
+
+if (s % 32 === 16) modem(t);
+}
+}
+
+function scheduler() {
+if (!ctx || ctx.state !== "running") return;
+if (nextTime < ctx.currentTime - 0.1) nextTime = ctx.currentTime + 0.05;
+while (nextTime < ctx.currentTime + 0.12) {
+scheduleIntro(step, nextTime);
+nextTime += STEP;
+step = (step + 1) % 64;
+}
+}
+
+function start() {
+if (timer) return;
+step = 0;
+nextTime = ctx.currentTime + 0.08;
+timer = setInterval(scheduler, 25);
+master.gain.setTargetAtTime(0.22, ctx.currentTime, 0.2);
+}
+
+function stop() {
+if (timer) {
+clearInterval(timer);
+timer = null;
+}
+if (ctx && master) {
+master.gain.setTargetAtTime(0, ctx.currentTime, 0.1);
+}
+}
+
+/* ---------- cinematic motifs ---------- */
+
+function knipsArrive(t) {
+// "uh-oh" minor-second poke + low sneaky bass drop
+voice(motifBus, "square", 76, t, 0.12, 0.08, { filter: 2600, delay: true });
+voice(motifBus, "square", 77, t + 0.13, 0.16, 0.08, { filter: 2600, delay: true });
+voice(motifBus, "sawtooth", 33, t + 0.1, 0.5, 0.1, { filter: 400 });
+}
+
+function stampSlam(t) {
+// The slam itself
+noiseHit(motifBus, t, 0.35, 0.3, "lowpass", 600, 0.8);
+const o = ctx.createOscillator();
+const g = ctx.createGain();
+o.type = "sine";
+o.frequency.setValueAtTime(140, t);
+o.frequency.exponentialRampToValueAtTime(30, t + 0.5);
+g.gain.setValueAtTime(0.0001, t);
+g.gain.exponentialRampToValueAtTime(0.4, t + 0.01);
+g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+o.connect(g);
+g.connect(motifBus);
+o.start(t);
+o.stop(t + 0.6);
+// ALLOWED = A-major lift + sparkle run
+[69, 73, 76, 81].forEach((m, i) => {
+voice(motifBus, "square", m, t + 0.12 + i * 0.03, 0.5, 0.07, { filter: 3000, delay: true });
+});
+[81, 85, 88, 93].forEach((m, i) => {
+voice(motifBus, "triangle", m, t + 0.3 + i * 0.07, 0.2, 0.05, { delay: true });
+});
+}
+
+function shakeImpact(t) {
+noiseHit(motifBus, t, 0.25, 0.2, "lowpass", 800, 0.7);
+voice(motifBus, "sine", 50, t, 0.3, 0.15);
+}
+
+/* ---------- react to the cinematic ---------- */
+
+function hookObservers() {
+const popup = byId("knips-popup");
+if (popup) {
+new MutationObserver(() => {
+const show = popup.classList.contains("show");
+if (show && !wasPopup) {
+phase = Math.max(phase, 1);
+if (enabled && ctx) knipsArrive(ctx.currentTime + 0.01);
+}
+wasPopup = show;
+}).observe(popup, { attributes: true, attributeFilter: ["class"] });
+}
+
+const stamp = byId("knips-stamp");
+if (stamp) {
+new MutationObserver(() => {
+const allowed = stamp.classList.contains("stamp-allowed");
+if (allowed && !wasAllowed) {
+phase = 2;
+if (enabled && ctx) stampSlam(ctx.currentTime + 0.01);
+}
+wasAllowed = allowed;
+}).observe(stamp, { attributes: true, attributeFilter: ["class"] });
+}
+
+const term = document.querySelector(".terminal-box");
+if (term) {
+new MutationObserver(() => {
+if (term.classList.contains("shake") && enabled && ctx) {
+shakeImpact(ctx.currentTime + 0.01);
+}
+}).observe(term, { attributes: true, attributeFilter: ["class"] });
+}
+}
+
+/* ---------- toggle + UI ---------- */
+
+function updateBtn() {
+if (uiBtn) {
+uiBtn.textContent = enabled ? "👩‍💻 Knips: ON" : "👩‍💻 Knips: OFF";
+}
+}
+
+function toggle() {
+enabled = !enabled;
+savePref();
+if (!enabled && timer) stop();
+if (typeof showAchievement === "function") {
+showAchievement("KNIPS MUSIC: " + (enabled ? "ON" : "OFF"));
+}
+updateBtn();
+}
+
+window.addEventListener("keydown", (e) => {
+if (e.code === "KeyI" && !e.repeat) toggle();
+});
+
+function addButton(attempt = 0) {
+if (attempt > 30) return;
+const host = document.querySelector("#mtr-qol .mtr-qol-btns");
+if (!host) {
+setTimeout(() => addButton(attempt + 1), 400);
+return;
+}
+if (!byId("mtr-knips-music-btn")) {
+uiBtn = document.createElement("button");
+uiBtn.id = "mtr-knips-music-btn";
+uiBtn.type = "button";
+uiBtn.className = "mtr-mini";
+uiBtn.textContent = "👩‍💻 Knips";
+uiBtn.onclick = toggle;
+host.appendChild(uiBtn);
+updateBtn();
+}
+}
+
+/* ---------- autoplay unlock + main loop ---------- */
+
+function unlock() {
+if (!enabled) return;
+if (!ctx) ensureAudio();
+if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+}
+window.addEventListener("keydown", unlock);
+window.addEventListener("pointerdown", unlock);
+
+setInterval(() => {
+if (!enabled) {
+if (timer) stop();
+return;
+}
+if (introVisible()) {
+// ⚡ Never create the context here — pre-gesture it's illegal and spams
+// the console. The boot Space (unlock listener) creates + resumes it.
+if (ctx && ctx.state === "running" && !timer) start();
+} else {
+if (timer) stop();
+// Reset for the next cinematic run
+phase = 0;
+wasPopup = false;
+wasAllowed = false;
+}
+}, 200);
+
+hookObservers();
+setTimeout(() => addButton(0), 500);
+})();
+  /* 43 + 44. Rain / Snow */
+
+  function toggleFX(id, keyCode, label) {
+
+    window.addEventListener("keydown", (e) => {
+
+      if (e.code === keyCode && !e.repeat) {
+
+        const fx = byId(id);
+
+        if (!fx) return;
+
+
+
+        const on = fx.style.display !== "block";
+
+        fx.style.display = on ? "block" : "none";
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement(label + ": " + (on ? "ON" : "OFF"));
+
+        }
+
+      }
+
+    });
+
+  }
+
+
+
+  toggleFX("mtr-rain", "Digit1", "RAIN");
+
+  toggleFX("mtr-snow", "Digit2", "SNOW");
+
+
+
+  /* 45-50. Visual class toggles */
+
+  function toggleBodyClass(keyCode, className, label) {
+
+    window.addEventListener("keydown", (e) => {
+
+      if (e.code === keyCode && !e.repeat) {
+
+        document.body.classList.toggle(className);
+
+
+
+        const on = document.body.classList.contains(className);
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement(label + ": " + (on ? "ON" : "OFF"));
+
+        }
+
+      }
+
+    });
+
+  }
+
+
+
+  toggleBodyClass("Digit3", "mtr-crt-off", "CRT OFF");
+
+  toggleBodyClass("Digit4", "mtr-colorblind", "COLORBLIND");
+
+  toggleBodyClass("Digit5", "mtr-reduce", "REDUCE MOTION");
+
+  toggleBodyClass("Digit6", "mtr-large-hud", "LARGE HUD");
+
+  toggleBodyClass("Digit7", "mtr-contrast", "HIGH CONTRAST");
+
+  toggleBodyClass("Digit8", "mtr-compact-hud", "COMPACT HUD");
+
+
+
+  /* 51. Export save */
+
+  const exportBtn = byId("mtr-export");
+
+  if (exportBtn) {
+
+    exportBtn.onclick = () => {
+
+      try {
+
+        const data = {};
+
+
+
+        for (let i = 0; i < localStorage.length; i++) {
+
+          const k = localStorage.key(i);
+
+          if (k.startsWith("mtr_")) data[k] = localStorage.getItem(k);
+
+        }
+
+
+
+        const blob = new Blob([JSON.stringify(data, null, 2)], {
+
+          type: "application/json"
+
+        });
+
+
+
+        const a = document.createElement("a");
+
+        a.href = URL.createObjectURL(blob);
+
+        a.download = "mtr-save.json";
+
+        a.click();
+
+        URL.revokeObjectURL(a.href);
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("SAVE EXPORTED");
+
+        }
+
+      } catch (e) {
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("EXPORT FAILED");
+
+        }
+
+      }
+
+    };
+
+  }
+
+
+
+  /* 52. Import save */
+
+  const importBtn = byId("mtr-import");
+
+  const importFile = byId("mtr-import-file");
+
+
+
+  if (importBtn && importFile) {
+
+    importBtn.onclick = () => importFile.click();
+
+
+
+    importFile.onchange = async () => {
+
+      const file = importFile.files?.[0];
+
+      if (!file) return;
+
+
+
+      try {
+
+        const text = await file.text();
+
+        const data = JSON.parse(text);
+
+
+
+        Object.entries(data).forEach(([k, v]) => {
+
+          if (k.startsWith("mtr_")) {
+
+            localStorage.setItem(k, String(v));
+
+          }
+
+        });
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("SAVE IMPORTED");
+
+        }
+
+
+
+        setTimeout(() => location.reload(), 700);
+
+      } catch (e) {
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("IMPORT FAILED");
+
+        }
+
+      }
+
+    };
+
+  }
+
+
+
+  /* 53. Reset save */
+
+  const resetBtn = byId("mtr-reset");
+
+  if (resetBtn) {
+
+    resetBtn.onclick = () => {
+
+      if (!confirm("Reset all Mr. Truck's Revenge save data?")) return;
+
+
+
+      try {
+
+        Object.keys(localStorage)
+
+          .filter((k) => k.startsWith("mtr_"))
+
+          .forEach((k) => localStorage.removeItem(k));
+
+
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("SAVE RESET");
+
+        }
+
+
+
+        setTimeout(() => location.reload(), 700);
+
+      } catch (e) {
+
+        if (typeof showAchievement === "function") {
+
+          showAchievement("RESET FAILED");
+
+        }
+
+      }
+
+    };
+
+  }
+
+
+
+  /* 54. Version label already created above */
+
+
+
+  /* 55. Credits modal */
+
+  const credits = byId("mtr-credits");
+
+  const creditsBtn = byId("mtr-credits-btn");
+
+  const creditsClose = byId("mtr-credits-close");
+
+
+
+  if (credits && creditsBtn) {
+
+    creditsBtn.onclick = () => credits.classList.toggle("show");
+
+  }
+
+
+
+  if (credits && creditsClose) {
+
+    creditsClose.onclick = () => credits.classList.remove("show");
+
+  }
+
+
+
+  if (credits) {
+
+    credits.addEventListener("click", (e) => {
+
+      if (e.target === credits) credits.classList.remove("show");
+
+    });
+
+  }
+
+
+
+  window.addEventListener("keydown", (e) => {
+
+    if (e.code === "KeyO" && !e.repeat && credits) {
+
+      credits.classList.toggle("show");
+
+    }
+
+  });
+
+})();
+
+init()
+
+  </script>
 
 </body>
 
