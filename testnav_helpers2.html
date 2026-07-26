@@ -9230,6 +9230,225 @@ setTimeout(() => addButton(0), 500);
 init()
 
   </script>
+<!-- Mobile Controls -->
+
+<div id="mobile-controls" style="position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:none;gap:12px;z-index:30;pointer-events:auto;user-select:none;-webkit-user-select:none">
+
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;align-items:center">
+
+    <div></div>
+
+    <button id="btn-up" style="background:var(--accent);border:2px solid var(--accent);color:#000;width:56px;height:56px;border-radius:12px;font-size:20px;font-weight:700;touch-action:manipulation;-webkit-tap-highlight-color:transparent">▲</button>
+
+    <div></div>
+
+    <button id="btn-left" style="background:var(--panel);border:2px solid var(--accent);color:var(--text);width:56px;height:56px;border-radius:12px;font-size:20px;font-weight:700;touch-action:manipulation;-webkit-tap-highlight-color:transparent">◀</button>
+
+    <button id="btn-down" style="background:var(--danger);border:2px solid var(--danger);color:#fff;width:56px;height:56px;border-radius:12px;font-size:20px;font-weight:700;touch-action:manipulation;-webkit-tap-highlight-color:transparent">▼</button>
+
+    <button id="btn-right" style="background:var(--panel);border:2px solid var(--accent);color:var(--text);width:56px;height:56px;border-radius:12px;font-size:20px;font-weight:700;touch-action:manipulation;-webkit-tap-highlight-color:transparent">▶</button>
+
+  </div>
+
+  <button id="btn-nitro" style="background:linear-gradient(135deg,var(--gold),#e6b800);border:2px solid var(--gold);color:#000;width:72px;height:72px;border-radius:50%;font-size:11px;font-weight:800;touch-action:manipulation;-webkit-tap-highlight-color:transparent;box-shadow:0 4px 20px rgba(255,215,0,0.4)">NITRO</button>
+
+</div>
+
+
+
+<script>
+
+(function() {
+
+  // Only initialize on touch-capable devices
+
+  if(!('ontouchstart' in window) && navigator.maxTouchPoints === 0) return;
+
+  
+
+  const controls = document.getElementById('mobile-controls');
+
+  if(!controls) return;
+
+  controls.style.display = 'grid';
+
+  
+
+  // Helper: dispatch keyboard event that game's module listener will catch
+
+  const fireKey = (code, pressed) => {
+
+    const event = new KeyboardEvent(pressed ? 'keydown' : 'keyup', {
+
+      code: code,
+
+      key: code.replace('Arrow', '').replace('Space', ' '),
+
+      bubbles: true,
+
+      cancelable: true
+
+    });
+
+    window.dispatchEvent(event);
+
+  };
+
+  
+
+  // Bind button to key code
+
+  const bindBtn = (btnId, keyCode) => {
+
+    const btn = document.getElementById(btnId);
+
+    if(!btn) return;
+
+    
+
+    const start = (e) => {
+
+      e.preventDefault();
+
+      e.stopPropagation();
+
+      fireKey(keyCode, true);
+
+      if(navigator.vibrate) navigator.vibrate(5);
+
+    };
+
+    const end = (e) => {
+
+      e.preventDefault();
+
+      e.stopPropagation();
+
+      fireKey(keyCode, false);
+
+    };
+
+    
+
+    btn.addEventListener('touchstart', start, {passive: false});
+
+    btn.addEventListener('touchend', end, {passive: false});
+
+    btn.addEventListener('touchcancel', end, {passive: false});
+
+    btn.addEventListener('mousedown', start);
+
+    btn.addEventListener('mouseup', end);
+
+    btn.addEventListener('mouseleave', end);
+
+    btn.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  };
+
+  
+
+  bindBtn('btn-up', 'ArrowUp');
+
+  bindBtn('btn-down', 'ArrowDown');
+
+  bindBtn('btn-left', 'ArrowLeft');
+
+  bindBtn('btn-right', 'ArrowRight');
+
+  bindBtn('btn-nitro', 'Space');
+
+  
+
+  // Block context menu globally on controls
+
+  controls.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  
+
+  // Auto-hide on desktop input (keyboard/mouse)
+
+  const hideOnDesktopInput = () => {
+
+    if(controls.style.display !== 'none') {
+
+      controls.style.display = 'none';
+
+      controls.style.pointerEvents = 'none';
+
+      // Clean up listeners after hiding
+
+      window.removeEventListener('keydown', hideOnDesktopInput);
+
+      window.removeEventListener('mousedown', hideOnDesktopInput);
+
+    }
+
+  };
+
+  window.addEventListener('keydown', hideOnDesktopInput);
+
+  window.addEventListener('mousedown', hideOnDesktopInput);
+
+  
+
+  // Auto-hide/show based on shop/menu state
+
+  const observer = new MutationObserver(() => {
+
+    const shopOpen = document.getElementById('shop-panel')?.classList.contains('active');
+
+    const menuVisible = document.getElementById('menu')?.style.opacity === '1';
+
+    const gameOverVisible = document.getElementById('game-over')?.style.opacity === '1';
+
+    const shouldHide = shopOpen || menuVisible || gameOverVisible;
+
+    
+
+    if(!shouldHide && controls.style.display === 'none') {
+
+      // Only re-show if not hidden by desktop input
+
+      controls.style.display = 'grid';
+
+      controls.style.pointerEvents = 'auto';
+
+    } else if(shouldHide) {
+
+      controls.style.display = 'none';
+
+      controls.style.pointerEvents = 'none';
+
+    }
+
+  });
+
+  observer.observe(document.body, {attributes: true, subtree: true, attributeFilter: ['class', 'style']});
+
+})();
+
+</script>
+
+<!-- Anti-LanSchool Wizard -->
+
+<div id="anti-lan-wizard" style="display:none;position:fixed;inset:0;z-index:9998;background:rgba(3,3,8,0.97);justify-content:center;align-items:center;flex-direction:column;padding:20px;">
+
+  <div class="wizard-container" style="background:var(--panel);border:2px solid var(--accent);border-radius:16px;padding:32px;max-width:520px;width:92%;text-align:center;box-shadow:0 0 40px rgba(0,255,213,0.2);position:relative;">
+
+    <div id="wizard-step-indicator" style="font-size:12px;color:#889;margin-bottom:16px;letter-spacing:1px;">STEP 1 OF 3</div>
+
+    <div id="wizard-content" style="min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;"></div>
+
+    <div id="wizard-actions" style="display:flex;gap:12px;justify-content:center;margin-top:24px;flex-wrap:wrap;"></div>
+
+  </div>
+
+</div>
+
+<div id="white-flash-overlay" style="position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:9997;transition:opacity 0.05s;"></div><div id="white-flash-overlay" style="position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:9997;transition:opacity 0.05s;"></div>
+
+</body>
 
 </body>
 
