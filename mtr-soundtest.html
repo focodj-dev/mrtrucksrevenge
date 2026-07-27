@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MR. TRUCK'S REVENGE - Sound Test</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        #sound-test-container {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            padding: 20px;
+        }
+
+        .sound-box {
+            background: linear-gradient(145deg, rgba(12, 18, 32, .96), rgba(8, 12, 24, .98));
+            border: 3px solid transparent;
+            border-image: linear-gradient(135deg, rgba(0, 0, 0, 0.8), rgba(30, 30, 60, 0.4), rgba(0, 0, 0, 0.8)) 1;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 90%;
+            box-shadow: 0 0 60px rgba(42, 82, 152, .25), inset 0 0 40px rgba(0, 10, 25, .7);
+            position: relative;
+        }
+
+        .sound-title {
+            font-size: 48px;
+            font-weight: 900;
+            color: var(--accent);
+            text-shadow: 0 0 10px rgba(0, 255, 213, .3), 0 0 30px rgba(0, 255, 213, .2);
+            margin-bottom: 32px;
+            text-align: center;
+            letter-spacing: -1px;
+        }
+
+        .sound-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .sound-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 16px;
+            background: linear-gradient(135deg, rgba(0, 255, 213, .1), rgba(0, 255, 213, .05));
+            border: 2px solid var(--accent);
+            border-radius: 12px;
+            color: var(--text);
+            font-weight: 700;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all .2s cubic-bezier(.4, 0, .2, 1);
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+        }
+
+        .sound-btn:hover {
+            background: linear-gradient(135deg, rgba(0, 255, 213, .2), rgba(0, 255, 213, .1));
+            box-shadow: 0 0 20px rgba(0, 255, 213, .4);
+            transform: translateY(-2px);
+        }
+
+        .sound-btn:active {
+            transform: translateY(0);
+            box-shadow: 0 0 10px rgba(0, 255, 213, .2);
+        }
+
+        .sound-icon {
+            font-size: 24px;
+        }
+
+        .sound-label {
+            font-size: 11px;
+        }
+
+        .sound-controls {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-bottom: 32px;
+            flex-wrap: wrap;
+        }
+
+        .volume-control {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .volume-slider {
+            width: 200px;
+            height: 6px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: rgba(0, 255, 213, .2);
+            outline: none;
+            border-radius: 3px;
+            accent-color: var(--accent);
+        }
+
+        .volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--accent);
+            cursor: pointer;
+            border-radius: 50%;
+            box-shadow: 0 0 10px rgba(0, 255, 213, .6);
+        }
+
+        .volume-slider::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: var(--accent);
+            cursor: pointer;
+            border-radius: 50%;
+            border: none;
+            box-shadow: 0 0 10px rgba(0, 255, 213, .6);
+        }
+
+        .volume-label {
+            font-size: 14px;
+            color: var(--accent);
+            text-shadow: 0 0 6px var(--crt-glow);
+        }
+
+        .volume-value {
+            font-weight: 700;
+            color: var(--gold);
+            min-width: 30px;
+        }
+
+        .sound-info {
+            text-align: center;
+            color: #889;
+            font-size: 12px;
+            margin-bottom: 24px;
+            padding: 12px;
+            border: 1px solid rgba(0, 255, 213, .15);
+            border-radius: 8px;
+            background: rgba(0, 20, 30, .3);
+        }
+
+        .controls-bar {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .control-btn {
+            background: linear-gradient(135deg, var(--accent), #0ca);
+            color: #000;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all .2s cubic-bezier(.4, 0, .2, 1);
+            text-transform: uppercase;
+            letter-spacing: .5px;
+        }
+
+        .control-btn:hover {
+            box-shadow: 0 4px 20px rgba(0, 255, 213, .4);
+            transform: translateY(-1px);
+        }
+
+        .control-btn:active {
+            transform: translateY(0);
+        }
+
+        .back-btn {
+            background: rgba(255, 61, 87, .2);
+            color: var(--danger);
+            border: 2px solid var(--danger);
+            padding: 10px 20px;
+            font-size: 12px;
+        }
+
+        .back-btn:hover {
+            background: var(--danger);
+            color: #fff;
+            box-shadow: 0 4px 20px rgba(255, 61, 87, .4);
+        }
+
+        .now-playing {
+            text-align: center;
+            color: var(--gold);
+            font-size: 13px;
+            font-weight: 700;
+            margin-top: 24px;
+            padding-top: 24px;
+            border-top: 1px solid rgba(255, 215, 0, .2);
+            min-height: 20px;
+            text-shadow: 0 0 6px rgba(255, 215, 0, .3);
+        }
+
+        @media (max-width: 600px) {
+            .sound-box {
+                padding: 24px;
+            }
+
+            .sound-title {
+                font-size: 32px;
+                margin-bottom: 24px;
+            }
+
+            .sound-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .volume-slider {
+                width: 120px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="sound-test-container">
+        <div class="sound-box">
+            <div class="sound-title">🎵 SOUND TEST 🎵</div>
+            
+            <div class="sound-info">
+                Click any track to listen. Adjust volume below.
+            </div>
+
+            <div class="sound-controls">
+                <div class="volume-control">
+                    <span class="volume-label">VOL:</span>
+                    <input type="range" min="0" max="100" value="70" class="volume-slider" id="volumeSlider">
+                    <span class="volume-value" id="volumeValue">70%</span>
+                </div>
+            </div>
+
+            <div class="controls-bar">
+                <button class="control-btn" id="stopBtn">⏹ STOP</button>
+            </div>
+
+            <div class="sound-grid">
+                <button class="sound-btn" data-sound="menu">
+                    <span class="sound-icon">🎮</span>
+                    <span class="sound-label">MENU</span>
+                </button>
+                <button class="sound-btn" data-sound="engine">
+                    <span class="sound-icon">🏎️</span>
+                    <span class="sound-label">ENGINE</span>
+                </button>
+                <button class="sound-btn" data-sound="crash">
+                    <span class="sound-icon">💥</span>
+                    <span class="sound-label">CRASH</span>
+                </button>
+                <button class="sound-btn" data-sound="pickup">
+                    <span class="sound-icon">⭐</span>
+                    <span class="sound-label">PICKUP</span>
+                </button>
+                <button class="sound-btn" data-sound="upgrade">
+                    <span class="sound-icon">⚡</span>
+                    <span class="sound-label">UPGRADE</span>
+                </button>
+                <button class="sound-btn" data-sound="levelup">
+                    <span class="sound-icon">🎉</span>
+                    <span class="sound-label">LEVEL UP</span>
+                </button>
+                <button class="sound-btn" data-sound="gameover">
+                    <span class="sound-icon">💀</span>
+                    <span class="sound-label">GAME OVER</span>
+                </button>
+                <button class="sound-btn" data-sound="victory">
+                    <span class="sound-icon">🏆</span>
+                    <span class="sound-label">VICTORY</span>
+                </button>
+            </div>
+
+            <div class="controls-bar">
+                <button class="control-btn back-btn" onclick="window.history.back()">← BACK</button>
+            </div>
+
+            <div class="now-playing" id="nowPlaying">— READY —</div>
+        </div>
+    </div>
+
+    <audio id="audioPlayer" preload="auto"></audio>
+
+    <script>
+        const audioPlayer = document.getElementById('audioPlayer');
+        const soundButtons = document.querySelectorAll('.sound-btn');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const volumeValue = document.getElementById('volumeValue');
+        const stopBtn = document.getElementById('stopBtn');
+        const nowPlaying = document.getElementById('nowPlaying');
+
+        // Map sound names to file paths (adjust paths as needed for your audio files)
+        const soundMap = {
+            menu: 'sounds/menu.mp3',
+            engine: 'sounds/engine.mp3',
+            crash: 'sounds/crash.mp3',
+            pickup: 'sounds/pickup.mp3',
+            upgrade: 'sounds/upgrade.mp3',
+            levelup: 'sounds/levelup.mp3',
+            gameover: 'sounds/gameover.mp3',
+            victory: 'sounds/victory.mp3'
+        };
+
+        // Initialize volume
+        audioPlayer.volume = volumeSlider.value / 100;
+
+        // Volume control
+        volumeSlider.addEventListener('input', (e) => {
+            audioPlayer.volume = e.target.value / 100;
+            volumeValue.textContent = e.target.value + '%';
+        });
+
+        // Sound button click handlers
+        soundButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const soundName = btn.dataset.sound;
+                const soundPath = soundMap[soundName];
+                
+                if (soundPath) {
+                    audioPlayer.src = soundPath;
+                    audioPlayer.currentTime = 0;
+                    audioPlayer.play().catch(err => {
+                        nowPlaying.textContent = '⚠ AUDIO FILE NOT FOUND';
+                    });
+                    
+                    const label = btn.querySelector('.sound-label').textContent;
+                    nowPlaying.textContent = `▶ NOW PLAYING: ${label}`;
+                }
+            });
+        });
+
+        // Stop button
+        stopBtn.addEventListener('click', () => {
+            audioPlayer.pause();
+            audioPlayer.currentTime = 0;
+            nowPlaying.textContent = '⏹ STOPPED';
+        });
+
+        // Update display when audio ends
+        audioPlayer.addEventListener('ended', () => {
+            nowPlaying.textContent = '✓ FINISHED';
+        });
+
+        // Handle audio errors
+        audioPlayer.addEventListener('error', () => {
+            nowPlaying.textContent = '⚠ ERROR LOADING AUDIO';
+        });
+    </script>
+</body>
+</html>
