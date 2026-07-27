@@ -23,7 +23,7 @@
             border-image: linear-gradient(135deg, rgba(0, 0, 0, 0.8), rgba(30, 30, 60, 0.4), rgba(0, 0, 0, 0.8)) 1;
             border-radius: 20px;
             padding: 40px;
-            max-width: 600px;
+            max-width: 700px;
             width: 90%;
             box-shadow: 0 0 60px rgba(42, 82, 152, .25), inset 0 0 40px rgba(0, 10, 25, .7);
             position: relative;
@@ -159,6 +159,7 @@
             justify-content: center;
             gap: 12px;
             margin-bottom: 24px;
+            flex-wrap: wrap;
         }
 
         .control-btn {
@@ -236,53 +237,53 @@
             <div class="sound-title">🎵 SOUND TEST 🎵</div>
             
             <div class="sound-info">
-                Click any track to listen. Adjust volume below.
+                Experience the audio synthesis engine. Click any sound to hear it generated in real-time.
             </div>
 
             <div class="sound-controls">
                 <div class="volume-control">
-                    <span class="volume-label">VOL:</span>
+                    <span class="volume-label">MASTER:</span>
                     <input type="range" min="0" max="100" value="70" class="volume-slider" id="volumeSlider">
                     <span class="volume-value" id="volumeValue">70%</span>
                 </div>
             </div>
 
             <div class="controls-bar">
-                <button class="control-btn" id="stopBtn">⏹ STOP</button>
+                <button class="control-btn" id="stopBtn">⏹ STOP ALL</button>
             </div>
 
             <div class="sound-grid">
-                <button class="sound-btn" data-sound="menu">
-                    <span class="sound-icon">🎮</span>
-                    <span class="sound-label">MENU</span>
+                <button class="sound-btn" data-sound="heartbeat">
+                    <span class="sound-icon">💓</span>
+                    <span class="sound-label">HEARTBEAT</span>
                 </button>
-                <button class="sound-btn" data-sound="engine">
-                    <span class="sound-icon">🏎️</span>
-                    <span class="sound-label">ENGINE</span>
+                <button class="sound-btn" data-sound="kick">
+                    <span class="sound-icon">🥁</span>
+                    <span class="sound-label">KICK</span>
                 </button>
-                <button class="sound-btn" data-sound="crash">
-                    <span class="sound-icon">💥</span>
-                    <span class="sound-label">CRASH</span>
+                <button class="sound-btn" data-sound="bell">
+                    <span class="sound-icon">🔔</span>
+                    <span class="sound-label">BELL</span>
                 </button>
-                <button class="sound-btn" data-sound="pickup">
-                    <span class="sound-icon">⭐</span>
-                    <span class="sound-label">PICKUP</span>
+                <button class="sound-btn" data-sound="pizz">
+                    <span class="sound-icon">🎸</span>
+                    <span class="sound-label">PIZZ</span>
                 </button>
-                <button class="sound-btn" data-sound="upgrade">
+                <button class="sound-btn" data-sound="riser">
+                    <span class="sound-icon">📈</span>
+                    <span class="sound-label">RISER</span>
+                </button>
+                <button class="sound-btn" data-sound="noise">
                     <span class="sound-icon">⚡</span>
-                    <span class="sound-label">UPGRADE</span>
+                    <span class="sound-label">NOISE</span>
                 </button>
-                <button class="sound-btn" data-sound="levelup">
-                    <span class="sound-icon">🎉</span>
-                    <span class="sound-label">LEVEL UP</span>
+                <button class="sound-btn" data-sound="chirp">
+                    <span class="sound-icon">🐦</span>
+                    <span class="sound-label">CHIRP</span>
                 </button>
-                <button class="sound-btn" data-sound="gameover">
-                    <span class="sound-icon">💀</span>
-                    <span class="sound-label">GAME OVER</span>
-                </button>
-                <button class="sound-btn" data-sound="victory">
-                    <span class="sound-icon">🏆</span>
-                    <span class="sound-label">VICTORY</span>
+                <button class="sound-btn" data-sound="typewriter">
+                    <span class="sound-icon">⌨️</span>
+                    <span class="sound-label">TYPE</span>
                 </button>
             </div>
 
@@ -294,72 +295,257 @@
         </div>
     </div>
 
-    <audio id="audioPlayer" preload="auto"></audio>
-
     <script>
-        const audioPlayer = document.getElementById('audioPlayer');
+        /* ============ WEBAUDIO SYNTHESIS ENGINE ============ */
+        
+        let ctx = null;
+        let master = null;
+        let sfxBus = null;
+        let noiseBuffer = null;
+
+        // Initialize audio context
+        function getAudioContext() {
+            try {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                if (!AC) return null;
+
+                if (!ctx) {
+                    ctx = new AC();
+                    
+                    // Master output
+                    master = ctx.createGain();
+                    master.gain.value = 0.7;
+                    master.connect(ctx.destination);
+
+                    // SFX bus
+                    sfxBus = ctx.createGain();
+                    sfxBus.gain.value = 0.8;
+                    sfxBus.connect(master);
+
+                    // Create noise buffer for percussive sounds
+                    noiseBuffer = makeNoiseBuffer();
+                }
+
+                if (ctx.state === "suspended") {
+                    ctx.resume().catch(() => {});
+                }
+
+                return ctx;
+            } catch (e) {
+                console.error("AudioContext error:", e);
+                return null;
+            }
+        }
+
+        // Generate white noise buffer
+        function makeNoiseBuffer() {
+            if (!ctx) return null;
+            const len = Math.floor(ctx.sampleRate * 1.0);
+            const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < len; i++) {
+                data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 2);
+            }
+            return buffer;
+        }
+
+        // MIDI note to Hz conversion
+        function midiHz(m) {
+            return 440 * Math.pow(2, (m - 69) / 12);
+        }
+
+        // Oscillator voice with envelope
+        function voice(bus, type, midi, t, dur, gain, opts = {}) {
+            if (!ctx || !bus) return;
+
+            const o = ctx.createOscillator();
+            o.type = type;
+            o.frequency.value = midiHz(midi);
+
+            const g = ctx.createGain();
+            const attack = opts.attack == null ? 0.006 : opts.attack;
+
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + attack);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+            o.connect(g);
+            g.connect(bus);
+
+            o.start(t);
+            o.stop(t + dur + 0.08);
+        }
+
+        // Noise hit for percussive/noisy sounds
+        function noiseHit(bus, t, dur, gain, filterType = "bandpass", freq = 1000, q = 1) {
+            if (!ctx || !bus || !noiseBuffer) return;
+
+            const src = ctx.createBufferSource();
+            src.buffer = noiseBuffer;
+
+            const f = ctx.createBiquadFilter();
+            f.type = filterType;
+            f.frequency.value = freq;
+            f.Q.value = q;
+
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(Math.max(0.001, gain), t + 0.004);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+            src.connect(f);
+            f.connect(g);
+            g.connect(bus);
+
+            src.start(t);
+            src.stop(t + dur + 0.05);
+        }
+
+        // Frequency riser
+        function riser(bus, t, dur, freqStart, freqEnd, gain) {
+            if (!ctx || !bus) return;
+
+            const o = ctx.createOscillator();
+            o.type = "sine";
+            o.frequency.setValueAtTime(freqStart, t);
+            o.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(gain, t + 0.05);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+            o.connect(g);
+            g.connect(bus);
+
+            o.start(t);
+            o.stop(t + dur + 0.05);
+        }
+
+        /* ============ SOUND EFFECTS ============ */
+
+        function playHeartbeat() {
+            const t = ctx.currentTime + 0.01;
+            voice(sfxBus, "sine", 34, t, 0.24, 0.22);
+            voice(sfxBus, "sine", 34, t + 0.28, 0.18, 0.2);
+        }
+
+        function playKick() {
+            const t = ctx.currentTime + 0.01;
+            const o = ctx.createOscillator();
+            const g = ctx.createGain();
+
+            o.type = "sine";
+            o.frequency.setValueAtTime(130, t);
+            o.frequency.exponentialRampToValueAtTime(44, t + 0.1);
+
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(0.4, t + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+
+            o.connect(g);
+            g.connect(sfxBus);
+
+            o.start(t);
+            o.stop(t + 0.2);
+        }
+
+        function playBell() {
+            const t = ctx.currentTime + 0.01;
+            voice(sfxBus, "triangle", 91, t, 0.5, 0.07);
+            voice(sfxBus, "sine", 91, t, 0.7, 0.05);
+        }
+
+        function playPizz() {
+            const t = ctx.currentTime + 0.01;
+            voice(sfxBus, "triangle", 39, t, 0.16, 0.16);
+            voice(sfxBus, "sawtooth", 27, t, 0.14, 0.07);
+        }
+
+        function playRiser() {
+            const t = ctx.currentTime + 0.01;
+            riser(sfxBus, t, 0.8, 80, 600, 0.12);
+        }
+
+        function playNoise() {
+            const t = ctx.currentTime + 0.01;
+            noiseHit(sfxBus, t, 0.35, 0.2, "highpass", 3000, 0.8);
+        }
+
+        function playChirp() {
+            const t = ctx.currentTime + 0.01;
+            voice(sfxBus, "triangle", 84, t, 0.12, 0.15);
+            voice(sfxBus, "sine", 72, t + 0.1, 0.12, 0.1);
+        }
+
+        function playTypewriter() {
+            const t = ctx.currentTime + 0.01;
+            noiseHit(sfxBus, t, 0.025, 0.05, "highpass", 4200 + Math.random() * 1800, 0.8);
+        }
+
+        function stopAll() {
+            if (ctx) {
+                ctx.close();
+                ctx = null;
+                master = null;
+                sfxBus = null;
+            }
+        }
+
+        /* ============ UI EVENT HANDLERS ============ */
+
         const soundButtons = document.querySelectorAll('.sound-btn');
         const volumeSlider = document.getElementById('volumeSlider');
         const volumeValue = document.getElementById('volumeValue');
         const stopBtn = document.getElementById('stopBtn');
         const nowPlaying = document.getElementById('nowPlaying');
 
-        // Map sound names to file paths (adjust paths as needed for your audio files)
         const soundMap = {
-            menu: 'sounds/menu.mp3',
-            engine: 'sounds/engine.mp3',
-            crash: 'sounds/crash.mp3',
-            pickup: 'sounds/pickup.mp3',
-            upgrade: 'sounds/upgrade.mp3',
-            levelup: 'sounds/levelup.mp3',
-            gameover: 'sounds/gameover.mp3',
-            victory: 'sounds/victory.mp3'
+            heartbeat: playHeartbeat,
+            kick: playKick,
+            bell: playBell,
+            pizz: playPizz,
+            riser: playRiser,
+            noise: playNoise,
+            chirp: playChirp,
+            typewriter: playTypewriter
         };
 
-        // Initialize volume
-        audioPlayer.volume = volumeSlider.value / 100;
-
-        // Volume control
-        volumeSlider.addEventListener('input', (e) => {
-            audioPlayer.volume = e.target.value / 100;
-            volumeValue.textContent = e.target.value + '%';
-        });
-
-        // Sound button click handlers
         soundButtons.forEach(btn => {
             btn.addEventListener('click', () => {
                 const soundName = btn.dataset.sound;
-                const soundPath = soundMap[soundName];
-                
-                if (soundPath) {
-                    audioPlayer.src = soundPath;
-                    audioPlayer.currentTime = 0;
-                    audioPlayer.play().catch(err => {
-                        nowPlaying.textContent = '⚠ AUDIO FILE NOT FOUND';
-                    });
-                    
+                const soundFn = soundMap[soundName];
+
+                if (soundFn) {
+                    getAudioContext();
+                    if (!ctx) {
+                        nowPlaying.textContent = '⚠ AUDIO NOT AVAILABLE';
+                        return;
+                    }
+
+                    soundFn();
                     const label = btn.querySelector('.sound-label').textContent;
-                    nowPlaying.textContent = `▶ NOW PLAYING: ${label}`;
+                    nowPlaying.textContent = `▶ ${label}`;
                 }
             });
         });
 
-        // Stop button
+        volumeSlider.addEventListener('input', (e) => {
+            if (master) {
+                master.gain.value = e.target.value / 100 * 0.7;
+            }
+            volumeValue.textContent = e.target.value + '%';
+        });
+
         stopBtn.addEventListener('click', () => {
-            audioPlayer.pause();
-            audioPlayer.currentTime = 0;
+            stopAll();
             nowPlaying.textContent = '⏹ STOPPED';
         });
 
-        // Update display when audio ends
-        audioPlayer.addEventListener('ended', () => {
-            nowPlaying.textContent = '✓ FINISHED';
-        });
-
-        // Handle audio errors
-        audioPlayer.addEventListener('error', () => {
-            nowPlaying.textContent = '⚠ ERROR LOADING AUDIO';
-        });
+        // Initialize on first interaction
+        document.addEventListener('click', () => {
+            getAudioContext();
+        }, { once: true });
     </script>
 </body>
 </html>
