@@ -13526,7 +13526,677 @@ setTimeout(() => addButton(0), 500);
   });
 
 })();
+/* ============================================================
+   MR. TRUCK'S REVENGE — WRONG-WAY HEAT PACK  (v2)
+   v2 fixes: stars no longer covered by achievement toast;
+   cruisers spawn on-camera (ahead drop-ins + rubber-band),
+   dispatch audio/announcements, headlight beams, screen-edge
+   siren glow, first star at 10s instead of 20s.
+   REPLACE the entire v1 pack with this block. Same location:
+   inside the module script, after the QoL pack, before init().
+   ============================================================ */
+(() => {
+"use strict";
+const byId = (id) => document.getElementById(id);
 
+/* ---------- 1. STATE & PERSISTENCE ---------- */
+let coins = 15;
+let bankruptFlag = false;
+const COIN_KEY = "mtr_coins_v1";
+const loadCoins = () => { try { const v = parseInt(localStorage.getItem(COIN_KEY), 10); return Number.isFinite(v) ? v : 15; } catch (e) { return 15; } };
+const saveCoins = () => { try { localStorage.setItem(COIN_KEY, String(Math.max(0, coins))); } catch (e) {} };
+let lastCoinSave = 0;
+const saveCoinsThrottled = () => { const n = performance.now(); if (n - lastCoinSave > 4000) { lastCoinSave = n; saveCoins(); } };
+
+const Pit = { pending: { grace: 0, lives: 0, magnet: 0, shield: false } };
+
+/* ---------- 2. AUDIO ---------- */
+let AC = null;
+const audio = () => { try { const A = window.AudioContext || window.webkitAudioContext; if (!A) return null; if (!AC) AC = new A(); if (AC.state === "suspended") AC.resume().catch(() => {}); return AC; } catch (e) { return null; } };
+function blip(f0, f1, dur, type = "sine", vol = .06, when = 0) {
+  const c = audio(); if (!c) return;
+  const t = c.currentTime + when;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  o.connect(g).connect(c.destination);
+  o.start(t); o.stop(t + dur + .02);
+}
+const Siren = {
+  osc: null, lfo: null, lfoG: null, g: null,
+  ensure() {
+    const c = audio(); if (!c || this.osc) return;
+    this.osc = c.createOscillator(); this.osc.type = "triangle"; this.osc.frequency.value = 760;
+    this.lfo = c.createOscillator(); this.lfo.type = "sine"; this.lfo.frequency.value = 4.2;
+    this.lfoG = c.createGain(); this.lfoG.gain.value = 190;
+    this.g = c.createGain(); this.g.gain.value = 0;
+    this.lfo.connect(this.lfoG); this.lfoG.connect(this.osc.frequency);
+    this.osc.connect(this.g); this.g.connect(c.destination);
+    this.osc.start(); this.lfo.start();
+  },
+  set(level, fast) {
+    const c = audio(); if (!c) return;
+    this.ensure(); if (!this.g) return;
+    const t = c.currentTime;
+    this.g.gain.setTargetAtTime(Math.max(0, Math.min(1, level)) * .075, t, .15);
+    this.lfo.frequency.setTargetAtTime(fast ? 7.6 : 4.2, t, .2);
+  }
+};
+const sfx = {
+  coin(streak) { blip(900 + streak * 90, 1500 + streak * 120, .14, "square", .05); blip(1800 + streak * 120, 2400, .09, "sine", .03, .05); },
+  star() { blip(300, 520, .25, "sawtooth", .05); blip(300, 520, .25, "sawtooth", .05, .13); },
+  dispatch() { blip(520, 780, .18, "square", .05); blip(780, 540, .22, "square", .05, .13); },
+  bust() { blip(620, 170, .7, "sawtooth", .09); blip(410, 110, .85, "square", .06, .1); },
+  ram() { blip(160, 55, .3, "square", .11); },
+  escape() { blip(500, 900, .3, "triangle", .06); blip(700, 1250, .32, "triangle", .05, .15); },
+  shield() { blip(1300, 600, .3, "sine", .07); },
+  buy() { blip(700, 1000, .12, "square", .05); blip(1000, 1450, .14, "square", .05, .08); }
+};
+
+/* ---------- 3. SHARED GEOMETRY & MATERIALS ---------- */
+mats.copBody = new THREE.MeshStandardMaterial({ color: 0xeef2f5, metalness: .55, roughness: .3 });
+mats.copDark = new THREE.MeshStandardMaterial({ color: 0x14171c, metalness: .6, roughness: .4 });
+mats.copGlass = new THREE.MeshStandardMaterial({ color: 0x0c1622, metalness: .9, roughness: .08 });
+mats.coin = new THREE.MeshStandardMaterial({ color: 0xffd23f, metalness: .92, roughness: .22, emissive: 0xb47800, emissiveIntensity: .7 });
+mats.coinCore = new THREE.MeshStandardMaterial({ color: 0xffb300, metalness: .85, roughness: .35, emissive: 0x8a5a00, emissiveIntensity: .5 });
+
+const COP = {
+  body: new THREE.BoxGeometry(2.25, .8, 4.7),
+  stripe: new THREE.BoxGeometry(2.32, .34, 4.74),
+  cab: new THREE.BoxGeometry(1.9, .68, 2.4),
+  wheel: new THREE.CylinderGeometry(.4, .4, .42, 12),
+  bar: new THREE.BoxGeometry(1.5, .16, .5),
+  lens: new THREE.BoxGeometry(.66, .17, .46),
+  push: new THREE.BoxGeometry(2.0, .5, .22),
+  light: new THREE.BoxGeometry(.4, .2, .12)
+};
+const COP_CONE_GEO = new THREE.ConeGeometry(5, 26, 8, 1, true);
+const COP_CONE_MAT = new THREE.MeshBasicMaterial({ color: 0xfff4d6, transparent: true, opacity: .08, side: THREE.DoubleSide, depthWrite: false });
+const COIN_GEO = new THREE.CylinderGeometry(.85, .85, .16, 18);
+const COIN_CAP = new THREE.CylinderGeometry(.52, .52, .19, 18);
+
+function buildCruiser() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(COP.body, mats.copBody); body.position.y = .62; body.castShadow = true; g.add(body);
+  const stripe = new THREE.Mesh(COP.stripe, mats.copDark); stripe.position.y = .62; g.add(stripe);
+  const cab = new THREE.Mesh(COP.cab, mats.copGlass); cab.position.set(0, 1.22, -.35); g.add(cab);
+  [[-1.1, .4, 1.5], [1.1, .4, 1.5], [-1.1, .4, -1.5], [1.1, .4, -1.5]].forEach(p => {
+    const w = new THREE.Mesh(COP.wheel, mats.copDark); w.rotation.z = Math.PI / 2; w.position.set(...p); g.add(w);
+  });
+  const barBase = new THREE.Mesh(COP.bar, mats.copDark); barBase.position.set(0, 1.66, -.35); g.add(barBase);
+  const redM = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2244, emissiveIntensity: 4.2, toneMapped: false });
+  const bluM = new THREE.MeshStandardMaterial({ color: 0x000a55, emissive: 0x2266ff, emissiveIntensity: .25, toneMapped: false });
+  const lr = new THREE.Mesh(COP.lens, redM); lr.position.set(-.4, 1.66, -.35); g.add(lr);
+  const lb = new THREE.Mesh(COP.lens, bluM); lb.position.set(.4, 1.66, -.35); g.add(lb);
+  const push = new THREE.Mesh(COP.push, mats.copDark); push.position.set(0, .5, -2.42); g.add(push);
+  const hl = new THREE.Mesh(COP.light, mats.headlight); hl.position.set(-.6, .68, -2.4); g.add(hl);
+  const hr = hl.clone(); hr.position.x = .6; g.add(hr);
+  const tl = new THREE.Mesh(COP.light, mats.taillight); tl.position.set(-.6, .68, 2.4); g.add(tl);
+  const tr = tl.clone(); tr.position.x = .6; g.add(tr);
+  /* headlight beam — makes cruisers readable at distance */
+  const beam = new THREE.Mesh(COP_CONE_GEO, COP_CONE_MAT);
+  beam.rotation.x = -Math.PI / 2; beam.scale.y = .7; beam.position.set(0, .7, -14.5);
+  g.add(beam);
+  g.userData = { red: redM, blu: bluM };
+  return g;
+}
+
+/* ---------- 4. COIN PATROL ---------- */
+const CoinPatrol = {
+  list: [], fx: null, fxT: 0, fxPos: null,
+  streak: 0, streakT: 0, magnetT: 0,
+  init() {
+    if (!this.fx) {
+      this.fx = new ParticleSystem(36, { color: 0xffd700, spread: .5, offsetY: .4, offsetZ: 0 });
+      this.fx.points.visible = false;
+      this.fxPos = new THREE.Vector3();
+      scene.add(this.fx.points);
+    }
+    const n = (QualityManager && QualityManager.tier <= 1) ? 20 : 32;
+    if (this.list.length === 0) {
+      for (let i = 0; i < n; i++) {
+        const g = new THREE.Group();
+        const a = new THREE.Mesh(COIN_GEO, mats.coin); a.rotation.z = Math.PI / 2;
+        const b = new THREE.Mesh(COIN_CAP, mats.coinCore); b.rotation.z = Math.PI / 2;
+        g.add(a, b); scene.add(g);
+        this.list.push({ group: g, x: 0, z: 0, value: 1, phase: Math.random() * 6.28, alive: true });
+      }
+    }
+    this.list.forEach((c, i) => this.respawn(c, player.z - 240 - (i / n) * 1500 - Math.random() * 120));
+    this.streak = 0; this.streakT = 0;
+  },
+  respawn(c, z) {
+    const laneW = CONFIG.roadWidth / CONFIG.laneCount;
+    const lane = Math.floor(Math.random() * CONFIG.laneCount);
+    c.x = (lane - CONFIG.laneCount / 2 + .5) * laneW;
+    c.z = z;
+    c.value = Math.random() < .08 ? 5 : 1;
+    c.group.scale.setScalar(c.value > 1 ? 1.5 : 1);
+    c.group.visible = true; c.alive = true;
+  },
+  update(dt) {
+    const t = performance.now() * .001;
+    this.streakT -= dt; if (this.streakT <= 0) this.streak = 0;
+    if (this.magnetT > 0) this.magnetT -= dt;
+    const px = player.group.position.x, pz = player.z;
+    for (const c of this.list) {
+      if (!c.alive) continue;
+      if (c.z > pz + 90) this.respawn(c, pz - 1300 - Math.random() * 700);
+      const dz = c.z - pz;
+      if (this.magnetT > 0 && dz < 0 && dz > -45 && Math.abs(c.x - px) < 10) {
+        c.x += (px - c.x) * Math.min(1, dt * 6);
+      }
+      c.group.position.set(c.x, 1.05 + Math.sin(t * 3 + c.phase) * .22, c.z);
+      c.group.rotation.y = t * 4 + c.phase;
+      if (Math.abs(dz) < 4.2 && Math.abs(c.x - px) < 2.6) this.collect(c);
+    }
+    if (this.fxT > 0) {
+      this.fxT -= dt;
+      this.fx.update(dt, this.fxPos, 40);
+      if (this.fxT <= 0) this.fx.points.visible = false;
+    }
+  },
+  collect(c) {
+    c.alive = false; c.group.visible = false;
+    this.streak = this.streakT > 0 ? this.streak + 1 : 1;
+    this.streakT = 1.6;
+    coins += c.value;
+    sfx.coin(Math.min(this.streak, 8));
+    this.fxPos.set(c.x, 1.2, c.z);
+    this.fx.points.visible = true; this.fxT = .5;
+    coinHUD(c.value);
+    saveCoinsThrottled();
+  }
+};
+
+/* ---------- 5. HEAT SYSTEM ---------- */
+const Heat = {
+  wanted: 0, starT: 0, cops: [], escapeT: 0, invulnT: 0, blockT: 0,
+  busting: false, bustT: 0, bustCop: null, ticketShown: false, shield: false,
+  _lastDispatch: 0,
+  reset() {
+    this.despawnAll();
+    this.wanted = 0; this.starT = 0; this.escapeT = 0; this.invulnT = 0; this.blockT = 0;
+    this.busting = false; this.bustT = 0; this.bustCop = null; this.ticketShown = false;
+    Siren.set(0); hideBustUI(); syncCopDots();
+    copGlow.style.opacity = "0";
+  },
+  onRunStart() {
+    this.reset();
+    if (Pit.pending.grace) { this.starT = -(Pit.pending.grace - 10); Pit.pending.grace = 0; }
+    if (Pit.pending.magnet) { CoinPatrol.magnetT = Pit.pending.magnet; Pit.pending.magnet = 0; }
+    this.shield = Pit.pending.shield; Pit.pending.shield = false;
+  },
+  announceDispatch() {
+    const now = performance.now();
+    if (now - this._lastDispatch < 4000) return;
+    this._lastDispatch = now;
+    sfx.dispatch();
+    showAchievement(this.cops.length <= 1 ? "🚔 UNIT DISPATCHED" : "🚔 REINFORCEMENTS INBOUND");
+  },
+  spawnCop(ahead) {
+    if (this.cops.length >= 5) return;
+    const g = buildCruiser();
+    const laneW = CONFIG.roadWidth / CONFIG.laneCount;
+    const lane = Math.floor(Math.random() * CONFIG.laneCount);
+    const c = {
+      group: g, x: (lane - CONFIG.laneCount / 2 + .5) * laneW,
+      /* v2: ahead drop-ins land ON CAMERA; behind units arrive fast */
+      z: ahead ? player.z - 520 - Math.random() * 260 : player.z + 200 + Math.random() * 160,
+      speed: ahead ? Math.max(30, speed * .65) : speed + 45,
+      state: "PURSUE", phase: Math.random() * 6.28,
+      spinT: 0, spinDir: Math.random() > .5 ? 1 : -1, hit: false
+    };
+    g.position.set(c.x, 0, c.z);
+    scene.add(g); this.cops.push(c);
+  },
+  despawnAll() { this.cops.forEach(c => this.removeCop(c)); this.cops.length = 0; },
+  removeCop(c) { scene.remove(c.group); c.group.userData.red.dispose(); c.group.userData.blu.dispose(); },
+  spinOut(c) { if (c.state !== "SPINOUT") { c.state = "SPINOUT"; c.spinT = 0; } },
+  update(dt) {
+    const t = performance.now() * .001;
+    if (this.invulnT > 0) this.invulnT -= dt;
+    if (this.busting) { this.runBust(dt, t); return; }
+
+    /* stars climb while you drive the wrong way (first star ~10s) */
+    this.starT += dt;
+    const starEvery = this.wanted === 0 ? 10 : 18;
+    if (this.starT >= starEvery && this.wanted < 5) {
+      this.wanted++; this.starT = 0; sfx.star();
+      if (this.wanted === 1) {
+        this.spawnCop(true);              /* guaranteed visible first unit */
+        this._lastDispatch = performance.now();
+        sfx.dispatch();
+        showAchievement("⚠ WRONG WAY — 🚔 HEAT DISPATCHED");
+      } else {
+        showAchievement("🚨 HEAT LEVEL " + this.wanted + "★");
+      }
+    } else if (this.wanted >= 5) this.starT = 0;
+
+    /* maintain the pursuit */
+    const want = Math.min(this.wanted, 4);
+    const pursuing = this.cops.filter(c => c.state === "PURSUE").length;
+    if (pursuing < want && Math.random() < dt * 2) {
+      const before = this.cops.length;
+      this.spawnCop(Math.random() < .5);
+      if (this.cops.length > before) this.announceDispatch();
+    }
+
+    /* roadblocks at 3+ stars */
+    if (this.wanted >= 3) { this.blockT += dt; if (this.blockT > 22) { this.blockT = 0; this.spawnBlock(); } }
+
+    let nearest = 1e9;
+    for (let i = this.cops.length - 1; i >= 0; i--) {
+      const c = this.cops[i];
+      if (c.state === "PURSUE") {
+        const target = Math.min(speed * 1.05 + 12 + this.wanted * 4, speed + 34);
+        c.speed = THREE.MathUtils.damp(c.speed, target, 1.6, dt);
+        c.z -= c.speed * dt * 2.2;
+        const tx = player.group.position.x + Math.sin(t * .9 + c.phase) * 1.2;
+        c.x += (tx - c.x) * Math.min(1, dt * (1.1 + this.wanted * .25));
+        /* v2 rubber-band: a cruiser can never languish off-screen */
+        if (c.z > player.z + 450) c.z = player.z - 620 - Math.random() * 220;
+        else if (c.z < player.z - 1500) c.z = player.z + 220;
+
+        /* Mr. Truck HATES cops even more than you */
+        if (truck.active && checkBoxCollision(truck.group, c.group, 3.0, 4.6)) {
+          this.spinOut(c); coins += 2; coinHUD(2); sfx.ram();
+          showAchievement("🚛 MR. TRUCK VINDICATED +2"); continue;
+        }
+        /* contact */
+        if (this.invulnT <= 0 && Math.abs(c.x - player.group.position.x) < 2.7 && Math.abs(c.z - player.z) < 4.6) {
+          if (this.shield) { this.shield = false; this.spinOut(c); sfx.shield(); showAchievement("🛡️ BUST SHIELD USED"); }
+          else if (speed > 92 && keys.Space) { this.spinOut(c); coins += 2; coinHUD(2); sfx.ram(); showAchievement("💥 PITTED THE HEAT +2"); }
+          else { this.startBust(c); return; }
+        }
+      } else if (c.state === "BLOCK") {
+        if (this.invulnT <= 0 && !c.hit && Math.abs(c.z - player.z) < 4.2 && Math.abs(c.x - player.group.position.x) < 4.4) {
+          c.hit = true; hitPlayer(); speed *= .35; sfx.ram(); this.spinOut(c);
+        }
+      } else if (c.state === "SPINOUT") {
+        c.spinT += dt;
+        c.group.rotation.y += c.spinDir * 11 * dt * Math.max(0, 1 - c.spinT);
+        c.group.position.y = Math.abs(Math.sin(c.spinT * 9)) * 1.4 * (1 - c.spinT * .7);
+        c.z += 26 * dt; c.x += c.spinDir * 14 * dt;
+        if (c.spinT > 1.1) { this.removeCop(c); this.cops.splice(i, 1); continue; }
+      }
+      c.group.position.set(c.x, c.state === "SPINOUT" ? c.group.position.y : 0, c.z);
+      if (c.state === "PURSUE") c.group.rotation.y = (player.group.position.x - c.x) * .06;
+      else if (c.state === "BLOCK") c.group.rotation.y = Math.PI / 2;
+      const ph = t * 11 + c.phase;
+      c.group.userData.red.emissiveIntensity = Math.sin(ph) > 0 ? 4.2 : .25;
+      c.group.userData.blu.emissiveIntensity = Math.sin(ph) > 0 ? .25 : 4.2;
+      nearest = Math.min(nearest, Math.abs(c.z - player.z));
+    }
+
+    /* escape: outrun them for 8s and the heat cools */
+    const active = this.cops.some(c => c.state === "PURSUE");
+    if (!active && this.wanted > 0) {
+      this.escapeT += dt;
+      if (this.escapeT > 8) {
+        this.escapeT = 0; this.wanted = Math.max(0, this.wanted - 1);
+        if (this.wanted === 0) { coins += 2; coinHUD(2); sfx.escape(); showAchievement("🌙 LOST THE HEAT +2"); }
+        else showAchievement("HEAT COOLING… " + this.wanted + "★");
+      }
+    } else this.escapeT = 0;
+
+    Siren.set(this.cops.length ? Math.max(.15, 1 - nearest / 420) : 0, nearest < 140);
+    /* v2: screen-edge siren glow scales with proximity */
+    copGlow.style.opacity = this.cops.length ? String(Math.min(.85, Math.max(.12, 1 - nearest / 380))) : "0";
+    wantedHUD(); syncCopDots();
+  },
+  spawnBlock() {
+    const laneW = CONFIG.roadWidth / CONFIG.laneCount;
+    [0, 1, 2, 3].sort(() => Math.random() - .5).slice(0, 2).forEach(l => {
+      const g = buildCruiser();
+      const c = { group: g, x: (l - CONFIG.laneCount / 2 + .5) * laneW, z: player.z - 1150, speed: 0, state: "BLOCK", phase: Math.random() * 6.28, spinT: 0, spinDir: 1, hit: false };
+      g.position.set(c.x, 0, c.z); g.rotation.y = Math.PI / 2;
+      scene.add(g); this.cops.push(c);
+    });
+    showAchievement("🚧 ROADBLOCK AHEAD");
+    blip(880, 880, .12, "square", .05); blip(880, 880, .12, "square", .05, .18);
+  },
+  startBust(c) {
+    this.busting = true; this.bustT = 0; this.bustCop = c; this.ticketShown = false;
+    Siren.set(1, true); showBustUI(); sfx.bust();
+    copGlow.style.opacity = ".9";
+    const cc = byId("canvas-container");
+    if (cc) { cc.classList.remove("shake"); void cc.offsetWidth; cc.classList.add("shake"); }
+  },
+  runBust(dt, t) {
+    this.bustT += dt;
+    Siren.set(1, true);
+    speed = Math.max(0, speed - 90 * dt);
+    const c = this.bustCop;
+    if (c) {
+      c.x += ((player.group.position.x + 2.4) - c.x) * Math.min(1, dt * 4);
+      c.z += ((player.z + 1.2) - c.z) * Math.min(1, dt * 4);
+      c.group.position.set(c.x, 0, c.z);
+      const ph = t * 12;
+      c.group.userData.red.emissiveIntensity = Math.sin(ph) > 0 ? 4.5 : .25;
+      c.group.userData.blu.emissiveIntensity = Math.sin(ph) > 0 ? .25 : 4.5;
+    }
+    if (this.bustT > 1.5 && !this.ticketShown) { this.ticketShown = true; this.fine(); }
+    if (this.bustT > 3.6) this.finishBust();
+  },
+  fine() {
+    const fine = Math.min(coins, 4 + this.wanted * 2);
+    coins -= fine; saveCoins(); coinHUD(-fine);
+    showTicket(fine, this.wanted);
+    if (coins <= 0) { bankruptFlag = true; setTimeout(() => { if (gameActive) endGame(); }, 1100); }
+  },
+  finishBust() {
+    this.busting = false; this.bustCop = null; hideBustUI();
+    this.despawnAll(); syncCopDots();
+    this.wanted = 1; this.starT = 0; this.invulnT = 3;
+    wantedHUD();
+    showAchievement("🎫 CITATION ISSUED — DRIVE CLEAN");
+  }
+};
+
+/* ---------- 6. UI: coin box, wanted stars, cop glow, bust overlay ---------- */
+const uiStyle = document.createElement("style");
+uiStyle.textContent = `
+#mtr-coinbox{border-color:rgba(255,215,0,.4)!important}
+.mtr-coin-ico{width:18px;height:18px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#ffe98a,#ffd700 45%,#b8860b);box-shadow:0 0 10px rgba(255,215,0,.8);display:inline-block;animation:mtrCoinSpin 2.4s linear infinite}
+@keyframes mtrCoinSpin{0%{transform:rotateY(0)}100%{transform:rotateY(360deg)}}
+#mtr-coinbox.bump #mtr-coin-count{animation:mtrCoinBump .35s cubic-bezier(.34,1.56,.64,1)}
+@keyframes mtrCoinBump{0%{transform:scale(1)}40%{transform:scale(1.45);color:#fff}100%{transform:scale(1)}}
+#mtr-coinbox.lose{animation:mtrCoinLose .5s}
+#mtr-coinbox.lose #mtr-coin-count{color:var(--danger)}
+@keyframes mtrCoinLose{0%,100%{transform:none}20%{transform:translateX(-5px)}40%{transform:translateX(5px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
+/* v2: stars sit BELOW the achievement toast (20–66px); chips pushed down to match */
+#mtr-chips{top:108px}
+#mtr-wanted{position:fixed;top:72px;left:50%;transform:translateX(-50%);z-index:11;display:flex;gap:6px;align-items:center;background:rgba(8,8,16,.72);border:1px solid rgba(255,61,87,.3);padding:6px 14px;border-radius:999px;pointer-events:none;backdrop-filter:blur(6px)}
+.wstar{font-size:18px;color:rgba(255,255,255,.14);transition:.25s}
+.wstar.on{color:var(--danger);text-shadow:0 0 12px rgba(255,61,87,.9)}
+#mtr-wanted.hot .wstar.on{animation:wstarPulse .5s infinite alternate}
+@keyframes wstarPulse{from{transform:scale(1)}to{transform:scale(1.25)}}
+#mtr-wrongway{font-size:9px;letter-spacing:1.5px;color:#ff9aa8;border-left:1px solid rgba(255,255,255,.15);padding-left:8px;opacity:.5}
+#mtr-wanted.hot #mtr-wrongway{opacity:1;animation:wwBlink 1s infinite}
+@keyframes wwBlink{50%{opacity:.3}}
+@media (max-width:768px){#mtr-wanted{top:64px;padding:4px 10px}.wstar{font-size:14px}#mtr-chips{top:100px}}
+/* v2: red/blue screen-edge strobe when the heat is close */
+#mtr-copglow{position:fixed;inset:0;z-index:14;pointer-events:none;opacity:0;transition:opacity .35s;animation:mtrCopGlow .55s steps(2,jump-none) infinite}
+@keyframes mtrCopGlow{
+ 0%,100%{background:radial-gradient(ellipse at left,rgba(255,20,70,.5),transparent 42%),radial-gradient(ellipse at right,rgba(30,90,255,.14),transparent 42%)}
+ 50%{background:radial-gradient(ellipse at left,rgba(255,20,70,.14),transparent 42%),radial-gradient(ellipse at right,rgba(30,90,255,.5),transparent 42%)}
+}
+#mtr-busted{position:fixed;inset:0;z-index:1400;display:none;align-items:center;justify-content:center;flex-direction:column;pointer-events:none}
+#mtr-busted.active{display:flex}
+#mtr-bust-flash{position:absolute;inset:0;opacity:0}
+#mtr-busted.active #mtr-bust-flash{opacity:1;animation:mtrSirenFlash .44s steps(2,end) infinite}
+@keyframes mtrSirenFlash{0%,100%{background:radial-gradient(ellipse at center,transparent 30%,rgba(255,0,50,.35))}50%{background:radial-gradient(ellipse at center,transparent 30%,rgba(0,90,255,.35))}}
+#mtr-busted-title{font-size:min(120px,18vw);font-weight:900;color:#fff;letter-spacing:6px;text-shadow:0 0 30px rgba(255,0,50,.9),4px 4px 0 #7a0020;transform:rotate(-4deg);animation:bustSlam .5s cubic-bezier(.34,1.56,.64,1) both}
+@keyframes bustSlam{0%{transform:rotate(-4deg) scale(3);opacity:0;filter:blur(6px)}60%{transform:rotate(-4deg) scale(.92);opacity:1;filter:none}100%{transform:rotate(-4deg) scale(1)}}
+#mtr-ticket{margin-top:26px;width:min(340px,86vw);background:#f5f2e8;color:#22252e;font-family:Consolas,monospace;padding:18px 20px 26px;border-radius:6px;transform:rotate(-2deg) translateY(40px);opacity:0;transition:.45s cubic-bezier(.34,1.56,.64,1);box-shadow:0 18px 50px rgba(0,0,0,.6);position:relative}
+#mtr-busted.show-ticket #mtr-ticket{transform:rotate(-2deg) translateY(0);opacity:1}
+.tk-head{font-weight:900;letter-spacing:1px;border-bottom:2px dashed #b9b4a2;padding-bottom:8px;margin-bottom:10px;display:flex;justify-content:space-between}
+.tk-row{display:flex;justify-content:space-between;font-size:12px;margin:6px 0}
+.tk-row.fine b{color:#c0233a;font-size:16px}
+.tk-stamp{position:absolute;right:14px;bottom:34px;border:3px solid #c0233a;color:#c0233a;font-weight:900;padding:4px 10px;transform:rotate(-12deg);letter-spacing:2px;opacity:.85;border-radius:4px}
+.tk-barcode{margin-top:14px;height:26px;background:repeating-linear-gradient(90deg,#22252e 0 2px,transparent 2px 5px,#22252e 5px 6px,transparent 6px 9px)}
+#mtr-pitstop{margin-top:18px;padding-top:16px;border-top:1px dashed rgba(255,215,0,.35)}
+.pit-title{text-align:center;font-weight:800;color:var(--gold);letter-spacing:1px;font-size:15px;text-shadow:0 0 12px rgba(255,215,0,.4)}
+.pit-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:12px}
+.pit-btn{background:rgba(40,35,20,.7);border:1px solid rgba(255,215,0,.35);border-radius:10px;color:var(--text);padding:10px;cursor:pointer;display:flex;flex-direction:column;gap:4px;align-items:center;font-weight:700;font-size:13px;transition:all .2s}
+.pit-btn b{color:var(--gold)} .pit-btn i{font-style:normal;font-size:10px;color:#889;text-align:center}
+.pit-btn:hover:not(:disabled){transform:translateY(-2px);border-color:var(--gold);box-shadow:0 6px 18px rgba(255,215,0,.25)}
+.pit-btn:disabled{opacity:.4;cursor:not-allowed}
+@media (max-width:768px){#mtr-busted-title{letter-spacing:2px}}
+`;
+document.head.appendChild(uiStyle);
+
+const hud = byId("hud");
+if (hud) {
+  const box = document.createElement("div");
+  box.className = "hud-box"; box.id = "mtr-coinbox";
+  box.style.textAlign = "center";
+  box.innerHTML = `<div style="font-size:11px;opacity:.75;letter-spacing:1px">COINS</div>
+    <div style="display:flex;align-items:center;gap:8px;justify-content:center"><span class="mtr-coin-ico"></span><span id="mtr-coin-count" style="font-size:22px;font-weight:900;color:var(--gold)">15</span></div>`;
+  hud.insertBefore(box, hud.children[2]);
+}
+const wBar = document.createElement("div");
+wBar.id = "mtr-wanted";
+wBar.innerHTML = Array.from({ length: 5 }, () => `<span class="wstar">★</span>`).join("") + `<span id="mtr-wrongway">WRONG-WAY DRIVING</span>`;
+document.body.appendChild(wBar);
+
+const copGlow = document.createElement("div");
+copGlow.id = "mtr-copglow";
+document.body.appendChild(copGlow);
+
+const bustEl = document.createElement("div");
+bustEl.id = "mtr-busted";
+bustEl.innerHTML = `<div id="mtr-bust-flash"></div>
+  <div id="mtr-busted-title">BUSTED</div>
+  <div id="mtr-ticket">
+    <div class="tk-head"><span>🎫 TRAFFIC CITATION</span><span id="tk-num">#TKT-0000</span></div>
+    <div class="tk-row"><span>OFFICER</span><b>R. KNIPS · TRUANCY DIV.</b></div>
+    <div class="tk-row"><span>VIOLATION</span><b>WRONG-WAY DRIVING</b></div>
+    <div class="tk-row fine"><span>FINE</span><b id="tk-fine">-0 🪙</b></div>
+    <div class="tk-stamp">CONFISCATED</div>
+    <div class="tk-barcode"></div>
+  </div>`;
+document.body.appendChild(bustEl);
+
+function coinHUD(delta) {
+  const el = byId("mtr-coin-count"); if (el) el.textContent = coins;
+  const box = byId("mtr-coinbox");
+  if (box && delta !== 0) { box.classList.remove("bump", "lose"); void box.offsetWidth; box.classList.add(delta > 0 ? "bump" : "lose"); }
+  window.__MTR_COINS = coins;
+}
+function wantedHUD() {
+  const el = byId("mtr-wanted"); if (!el) return;
+  el.querySelectorAll(".wstar").forEach((s, i) => s.classList.toggle("on", i < Heat.wanted));
+  el.classList.toggle("hot", Heat.busting || Heat.cops.some(c => c.state === "PURSUE"));
+}
+function showBustUI() { const b = byId("mtr-busted"); if (b) { b.classList.remove("show-ticket"); b.classList.add("active"); } }
+function hideBustUI() { const b = byId("mtr-busted"); if (b) b.classList.remove("active", "show-ticket"); }
+function showTicket(fine, stars) {
+  const b = byId("mtr-busted"); if (b) b.classList.add("show-ticket");
+  const n = byId("tk-num"); if (n) n.textContent = "#TKT-" + (4000 + Math.floor(Math.random() * 999));
+  const f = byId("tk-fine"); if (f) f.textContent = "-" + fine + " 🪙 (" + stars + "★)";
+}
+
+const copDotPool = [];
+function syncCopDots() {
+  const mm = byId("minimap"); if (!mm) return;
+  while (copDotPool.length < 5) {
+    const d = document.createElement("div");
+    d.className = "mini-dot"; d.style.background = "#3aa0ff"; d.style.color = "#3aa0ff";
+    mm.appendChild(d); copDotPool.push(d);
+  }
+  copDotPool.forEach((d, i) => {
+    const c = Heat.cops[i];
+    if (!c) { d.style.display = "none"; return; }
+    d.style.display = "block";
+    const top = 50 + ((c.z - player.z) / 600) * 40;
+    const left = 50 + (c.x / CONFIG.roadWidth) * 80;
+    d.style.top = Math.max(6, Math.min(94, top)) + "%";
+    d.style.left = Math.max(8, Math.min(92, left)) + "%";
+  });
+}
+
+/* ---------- 7. PIT STOP ---------- */
+const shopGrid = document.querySelector("#shop-panel .shop-grid");
+if (shopGrid) {
+  const pit = document.createElement("div");
+  pit.id = "mtr-pitstop";
+  pit.innerHTML = `<div class="pit-title">🪙 PIT STOP — SPEND COINS <span id="pit-bal"></span></div>
+    <div class="pit-row">
+      <button class="pit-btn" id="pit-bribe">🍩 BRIBE<b>10 🪙</b><i>30s heat-free grace next run</i></button>
+      <button class="pit-btn" id="pit-life">❤️ EXTRA LIFE<b>20 🪙</b><i>Start next run with +1 heart</i></button>
+      <button class="pit-btn" id="pit-magnet">🧲 COIN MAGNET<b>8 🪙</b><i>Attract coins for 60s next run</i></button>
+      <button class="pit-btn" id="pit-shield">🛡️ BUST SHIELD<b>15 🪙</b><i>Block one bust next run</i></button>
+    </div>`;
+  shopGrid.parentNode.insertBefore(pit, shopGrid.nextSibling);
+  const COST = { bribe: 10, life: 20, magnet: 8, shield: 15 };
+  const buy = (k, fn) => { const b = byId("pit-" + k); if (b) b.onclick = () => { if (coins < COST[k]) return; coins -= COST[k]; fn(); sfx.buy(); saveCoins(); coinHUD(-COST[k]); refreshPit(); }; };
+  buy("bribe", () => { Pit.pending.grace = 30; showAchievement("🍩 HEAT WAVE SCHEDULED — 30s GRACE NEXT RUN"); });
+  buy("life", () => { Pit.pending.lives = 1; showAchievement("❤️ SPARE HEART IN THE GLOVEBOX NEXT RUN"); });
+  buy("magnet", () => { Pit.pending.magnet = 60; showAchievement("🧲 MAGNET INSTALLED FOR NEXT RUN"); });
+  buy("shield", () => { Pit.pending.shield = true; showAchievement("🛡️ SHIELD ARMED FOR NEXT RUN"); });
+}
+function refreshPit() {
+  const bal = byId("pit-bal"); if (bal) bal.textContent = "· BALANCE: " + coins + " 🪙";
+  const COST = { bribe: 10, life: 20, magnet: 8, shield: 15 };
+  Object.keys(COST).forEach(k => {
+    const b = byId("pit-" + k);
+    if (b) b.disabled = coins < COST[k] || (k === "shield" && Pit.pending.shield);
+  });
+}
+
+/* ---------- 8. HOOKS INTO THE BASE GAME ---------- */
+const _resetStats = resetStats;
+resetStats = function () {
+  _resetStats();
+  coins = loadCoins(); if (coins <= 0) coins = 15;
+  if (Pit.pending.lives) { lives = Math.min(5, lives + Pit.pending.lives); Pit.pending.lives = 0; updateHUD(); }
+  bankruptFlag = false;
+  const t = document.querySelector("#game-over .title"); if (t) t.textContent = "WRECKED";
+  coinHUD(0); wantedHUD();
+};
+
+const _resetPositions = resetPositions;
+resetPositions = function () {
+  _resetPositions();
+  CoinPatrol.init();
+  Heat.onRunStart();
+};
+
+const _hitPlayer = hitPlayer;
+hitPlayer = function () {
+  if (Heat.invulnT > 0 || Heat.busting) return;
+  _hitPlayer();
+};
+
+const _endGame = endGame;
+endGame = function () {
+  _endGame();
+  Siren.set(0); hideBustUI(); saveCoins();
+  copGlow.style.opacity = "0";
+  if (bankruptFlag) {
+    const t = document.querySelector("#game-over .title"); if (t) t.textContent = "IMPOUNDED";
+    const fs = byId("final-score");
+    if (fs) fs.innerHTML = `BANKRUPT — 0 🪙<br><span style="font-size:16px;opacity:.8">Score: ${score.toLocaleString()} · The precinct thanks you for your coins.</span>`;
+    coins = 15; saveCoins();
+  }
+};
+
+const _openShop = openShop;
+openShop = function () { _openShop(); refreshPit(); };
+
+/* ---------- 9. MAIN LOOP ---------- */
+const heatClock = new THREE.Clock();
+(function heatLoop() {
+  requestAnimationFrame(heatLoop);
+  const dt = Math.min(heatClock.getDelta(), .1);
+  if (!gameActive) { Siren.set(0); copGlow.style.opacity = "0"; return; }
+  if (speed < 1 && !Heat.busting) { Siren.set(0); return; }
+  CoinPatrol.update(dt);
+  Heat.update(dt);
+})();
+})();
+/* ============================================================
+   MR. TRUCK'S REVENGE — GAME-OVER ⇄ MENU STACKING FIX
+   Kills the two !important landmines that let #menu sit on
+   top of #game-over forever (see diagnosis above).
+   Paste inside the module script, AFTER the Heat Pack,
+   BEFORE the final init() call.
+   ============================================================ */
+(() => {
+"use strict";
+
+/* ---------- 1. CSS that outranks the landmines ---------- */
+const fixStyle = document.createElement("style");
+fixStyle.textContent = `
+/* Higher specificity + later + !important: beats the zero-resemblance
+   "#menu{display:flex!important}" block once and for all */
+#menu.menu-hidden{
+  display:none !important;
+  opacity:0 !important;
+  visibility:hidden !important;
+  pointer-events:none !important;
+}
+/* The death screen always outranks the menu (which showMenuScreen pins to 1002) */
+#game-over{ z-index:1003 !important; }
+/* Shop must sit above both when it is the active screen */
+#shop-panel{ z-index:1004 !important; }
+`;
+document.head.appendChild(fixStyle);
+
+/* ---------- 2. Hard show/hide helpers ---------- */
+const menuEl = () => document.getElementById("menu");
+
+function hideMenuNow() {
+  const m = menuEl(); if (!m) return;
+  m.classList.add("menu-hidden");
+  /* strip stale inline flags so the class + base CSS fully own the state */
+  ["opacity", "pointer-events", "display", "z-index"].forEach(p => m.style.removeProperty(p));
+}
+function showMenuNow() {
+  const m = menuEl(); if (!m) return;
+  m.classList.remove("menu-hidden");
+}
+function isCounting() {
+  const el = document.getElementById("mtr-countdown");
+  return !!el && (el.style.display === "flex" || getComputedStyle(el).display === "flex");
+}
+
+/* ---------- 3. Sync every transition point ---------- */
+const _showMenuScreen = showMenuScreen;
+showMenuScreen = function () { const r = _showMenuScreen(); showMenuNow(); return r; };
+
+const _closeShop = closeShop;
+closeShop = function () { const r = _closeShop(); showMenuNow(); return r; };
+
+const _openShop = openShop;
+openShop = function () { const r = _openShop(); hideMenuNow(); return r; };
+
+const _startGame = startGame;
+startGame = function () {
+  const r = _startGame();
+  const m = menuEl();
+  if (m) {
+    /* kill interactivity instantly, hard-hide once the fade would have landed
+       (the original's delayed display:none never stuck — see header) */
+    m.style.setProperty("opacity", "0", "important");
+    m.style.setProperty("pointer-events", "none", "important");
+  }
+  setTimeout(hideMenuNow, 450);
+  return r;
+};
+
+const _resetGame = resetGame;
+resetGame = function () { const r = _resetGame(); hideMenuNow(); return r; };
+
+const _endGame = endGame;
+endGame = function () {
+  const r = _endGame();
+  if (!isCounting()) {
+    hideMenuNow(); /* death must never leave the menu on top */
+    const go = document.getElementById("game-over");
+    if (go) {
+      go.style.setProperty("opacity", "1", "important");
+      go.style.setProperty("pointer-events", "auto", "important");
+    }
+  }
+  return r;
+};
+
+/* ---------- 4. Watchdog: game-over visible ⇒ menu hidden, always ---------- */
+setInterval(() => {
+  const go = document.getElementById("game-over");
+  const m = menuEl();
+  if (!go || !m) return;
+  if (parseFloat(getComputedStyle(go).opacity) > 0.5 && !m.classList.contains("menu-hidden")) {
+    hideMenuNow();
+  }
+}, 400);
+})();
 init()
 
   </script>
