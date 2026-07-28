@@ -14612,6 +14612,446 @@ setInterval(() => {
   }
 }, 400);
 })();
+/* ============================================================
+🎬 MR. TRUCK'S REVENGE — LEGENDARY CINEMATIC CAMERA PACK v1
+The decrepit static tripod is dead. This pack shadows
+updateCamera / switchCameraMode / resetCameraTarget with a
+full director rig. Nothing to delete — the old camera code
+simply never runs again.
+
+  MODES (C cycles · V jumps straight to DIRECTOR):
+    0 CHASE RIG — damped pursuit cam, speed-reactive FOV
+    1 MOTO FP   — first-person bike (kept, now smoothed)
+    2 AIRWOLF   — high helicopter perch with lateral sway
+    3 DIRECTOR  — orbiting cinema cam, auto punch-ins, letterbox
+    4 HOOD      — hood mount, telephoto rush
+
+  THE JUICE:
+    • 1.1s crane transitions between every mode (easeInOutCubic + lift)
+    • Nitro FOV kick + gear-shift punches at 40/80/115/138
+    • Procedural impact shake (crashes, rumbles, near-misses)
+    • Near-miss 0.55× micro slow-mo + whip roll
+    • Damage hit-stop (0.45× for 180ms)
+    • Auto look-back glance when Mr. Truck closes in (hold B)
+    • WRECKED death-cam: hit-stop → 0.22× slow-mo orbit + desaturate
+    • 2.39:1 letterbox bars with ● REC readout, HUD auto-nudge
+
+HOTKEYS: C cycle · V director · B hold-to-look-back
+PASTE: after the Stacking Fix pack, before init().
+============================================================ */
+(() => {
+"use strict";
+const byId = (id) => document.getElementById(id);
+
+/* ---------- 1. PREFS ---------- */
+const PREF_KEY = "mtr_cinecam_prefs_v1";
+const prefs = { fx: true, bars: true, autoLook: true, deathcam: true };
+try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || "{}")); } catch (e) {}
+const savePrefs = () => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) {} };
+
+/* ---------- 2. RIG STATE ---------- */
+const CINE = {
+  trans: false, transT: 0, transDur: 1.1,
+  fromPos: new THREE.Vector3(), fromLook: new THREE.Vector3(), fovFrom: 65,
+  pos: new THREE.Vector3(0, 15, 40),
+  look: new THREE.Vector3(0, 1.2, -25),
+  fov: 65, fovKick: 0, fovPunch: 0,
+  roll: 0, whip: 0, shake: 0,
+  lb: 0, lbHold: false, glanceT: 0,
+  orbitA: Math.random() * 6.28, punchT: 0,
+  ts: 1, tsTarget: 1, slowT: 0,
+  dying: false, deadT: 0, deadA: 0,
+  lastGear: 0, nearMissT: 0, barV: 0,
+  seed: Math.random() * 100
+};
+window.__CINE = CINE;
+
+const MODE_NAMES = ["CHASE RIG", "MOTO FP", "AIRWOLF", "DIRECTOR", "HOOD"];
+CAMERA_MODES.length = 0;
+MODE_NAMES.forEach(n => CAMERA_MODES.push(n));
+
+const _tgt = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 65 };
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
+const n1 = (x) => Math.sin(x) * .55 + Math.sin(x * 2.7 + 1.7) * .3 + Math.sin(x * 5.1 + 3.3) * .15;
+const camShake = (a) => { if (prefs.fx) CINE.shake = Math.min(1.5, CINE.shake + a); };
+
+/* ---------- 3. LETTERBOX BARS + REC ---------- */
+const barCSS = document.createElement("style");
+barCSS.textContent = `
+#cine-bar-top,#cine-bar-bot{position:fixed;left:0;right:0;height:0;background:#000;z-index:16;pointer-events:none}
+#cine-bar-top{top:0;border-bottom:1px solid rgba(255,215,0,.14)}
+#cine-bar-bot{bottom:0;border-top:1px solid rgba(255,215,0,.14)}
+#cine-rec{position:absolute;right:18px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:8px;
+font:700 10px Consolas,monospace;color:rgba(255,215,0,.9);letter-spacing:2.5px;opacity:0;transition:opacity .45s;white-space:nowrap}
+.cine-dot{width:7px;height:7px;border-radius:50%;background:#ff3d57;box-shadow:0 0 9px #ff3d57;animation:cineBlink 1.1s steps(2,jump-none) infinite}
+@keyframes cineBlink{50%{opacity:.12}}
+#hud{transition:opacity .4s cubic-bezier(.4,0,.2,1),transform .5s ease}
+#minimap{transition:transform .5s ease}
+body.cine-letterboxed #hud{transform:translateY(calc(7vh - 12px))}
+body.cine-letterboxed #minimap{transform:translateY(calc(-7vh + 12px))}
+@media (max-width:768px){body.cine-letterboxed #hud{transform:translateY(calc(7vh - 8px))}}
+`;
+document.head.appendChild(barCSS);
+const barTop = document.createElement("div"); barTop.id = "cine-bar-top";
+const barBot = document.createElement("div"); barBot.id = "cine-bar-bot";
+barBot.innerHTML = `<span id="cine-rec"><span class="cine-dot"></span>REC · DIRECTOR'S CUT · 2.39:1</span>`;
+document.body.appendChild(barTop); document.body.appendChild(barBot);
+const rec = byId("cine-rec");
+
+const hint = byId("camera-hint");
+if (hint) hint.innerHTML = "<strong>C</strong> cycle · <strong>V</strong> director · <strong>B</strong> look-back";
+
+/* ---------- 4. MODE TARGETS ---------- */
+function modeTarget(dt, t) {
+  const px = player.group.position.x, pz = player.z, vx = player.vx, sp = speed;
+  switch (cameraMode) {
+    case 0: // CHASE RIG
+      _tgt.pos.set(px, 14 + sp * .04, pz + 35 + sp * .08);
+      _tgt.look.set(px + vx * .35, 1.2, pz - (25 + sp * .1));
+      _tgt.fov = 62 + Math.min(16, sp * .12);
+      break;
+    case 1: // MOTO FP
+      _tgt.pos.set(px, player.group.position.y + 1.65, pz + .4);
+      _tgt.look.set(px, 1.5, pz - (45 + sp * .25));
+      _tgt.fov = 76 + Math.min(12, sp * .09);
+      break;
+    case 2: { // AIRWOLF
+      const o = sp / 140;
+      _tgt.pos.set(px + Math.cos(t * (.15 + .1 * o)) * (14 + 8 * o), 50 + 30 * o, pz + 60 + 20 * o);
+      _tgt.look.set(px, 0, pz - 70);
+      _tgt.fov = 52 + Math.min(10, sp * .06);
+      break;
+    }
+    case 3: { // DIRECTOR — orbit with rhythmic punch-ins
+      CINE.orbitA += dt * (.22 + sp * .004);
+      CINE.punchT += dt;
+      const cyc = CINE.punchT % 8;
+      const punch = cyc < 2 ? Math.sin((cyc / 2) * Math.PI) : 0;
+      const r = 26 - 10 * punch;
+      _tgt.pos.set(px + Math.sin(CINE.orbitA) * r, 8.5 + Math.sin(t * .5) * 1.6 + 4 * (1 - punch), pz + Math.cos(CINE.orbitA) * r);
+      if (truck.active) _tgt.look.set((px + truck.group.position.x) / 2, 1.4, (pz + truck.group.position.z) / 2);
+      else _tgt.look.set(px, 1.4, pz - 30);
+      _tgt.fov = 46 + Math.sin(t * .8) * 2 + 6 * (1 - punch);
+      break;
+    }
+    case 4: { // HOOD
+      const bob = sp > 15 ? Math.sin(t * 11) * .03 * (sp / 140) : 0;
+      _tgt.pos.set(px, player.group.position.y + 1.95 + bob, pz + .6);
+      _tgt.look.set(px + vx * .5, 1.1, pz - 130);
+      _tgt.fov = 68 + Math.min(18, sp * .14);
+      break;
+    }
+  }
+}
+
+/* ---------- 5. LOOK-BACK (over-the-shoulder glance) ---------- */
+function lookBackUpdate(dt) {
+  if (CINE.glanceT > 0) CINE.glanceT -= dt;
+  if (prefs.autoLook && truck.active && Math.abs(player.z - truck.group.position.z) < 110)
+    CINE.glanceT = Math.max(CINE.glanceT, .25);
+  const want = (CINE.lbHold || CINE.glanceT > 0) ? 1 : 0;
+  CINE.lb += (want - CINE.lb) * (1 - Math.pow(.004, dt));
+}
+function applyLookBack() {
+  if (CINE.lb < .003) return;
+  const e = CINE.lb * CINE.lb * (3 - 2 * CINE.lb);
+  const px = player.group.position.x, pz = player.z, sp = speed;
+  let tx = px, tz = pz + 90;
+  if (truck.active) { tx = truck.group.position.x; tz = truck.group.position.z; }
+  const dir = Math.sign(tz - pz) || 1;
+  _v1.set(px - 4 * dir, 4.4, pz - dir * (18 + sp * .05));
+  _v2.set(tx, 1.5, tz);
+  _tgt.pos.lerp(_v1, e);
+  _tgt.look.lerp(_v2, e);
+  _tgt.fov = THREE.MathUtils.lerp(_tgt.fov, 44, e);
+}
+
+/* ---------- 6. MOTORCYCLE + LIGHTS (ported from the old rig) ---------- */
+function syncMoto(t) {
+  if (!motorcycleGroup) return;
+  motorcycleGroup.position.copy(player.group.position);
+  motorcycleGroup.position.y = 0;
+  motorcycleGroup.rotation.y = player.group.rotation.y;
+  const needle = motorcycleGroup.userData.speedometerNeedle;
+  if (needle) {
+    const k = Math.min(1, speed / 140);
+    needle.rotation.z = needle.userData.baseRotation + (needle.userData.maxRotation - needle.userData.baseRotation) * k;
+  }
+  const vib = motorcycleGroup.userData.vibrationElements;
+  if (vib) vib.forEach(el => {
+    const o = Math.min(1, speed / 100);
+    el.scale.set(el.userData.baseScale + Math.sin(30 * t) * o * .3, el.userData.baseScale + Math.cos(35 * t) * o * .3, 1);
+  });
+}
+function followLights() {
+  scene.children.forEach(c => {
+    if (c.isDirectionalLight) {
+      c.position.x = player.group.position.x + (c === scene.children[2] ? 80 : -50);
+      c.position.z = player.group.position.z + (c === scene.children[2] ? -40 : 80);
+      if (c.target) { c.target.position.copy(player.group.position); c.target.updateMatrixWorld(); }
+    }
+  });
+}
+
+/* ---------- 7. DEATH-CAM ---------- */
+const cc = byId("canvas-container");
+function grade(v) { if (cc) cc.style.filter = `saturate(${(1 - v).toFixed(2)}) contrast(${(1 + v * .15).toFixed(2)}) brightness(${(1 - v * .12).toFixed(2)})`; }
+function restoreColor() { if (cc) cc.style.filter = ""; }
+function deathCam(dt) {
+  CINE.deadT += dt;
+  CINE.tsTarget = CINE.deadT < .14 ? .05 : .22;   // hit-stop, then dreamy slow-mo
+  CINE.deadA += dt * .6;
+  const r = 15 + CINE.deadT * 5.5;
+  const px = player.group.position.x, pz = player.z;
+  _tgt.pos.set(px + Math.sin(CINE.deadA) * r, 4.5 + CINE.deadT * 4.2, pz + Math.cos(CINE.deadA) * r);
+  _tgt.look.set(px, 1, pz);
+  _tgt.fov = 42;
+  grade(Math.min(1, CINE.deadT / 1.6));
+  if (CINE.deadT >= 2.5) {
+    CINE.tsTarget = 1; CINE.ts = 1;
+    restoreColor();
+    CINE.dying = false;
+    _endGame();
+  }
+}
+
+/* ---------- 8. THE NEW updateCamera ---------- */
+updateCamera = function (dt) {
+  dt = Math.min(dt || .016, .1);
+  const t = performance.now() * .001;
+
+  CINE.ts += (CINE.tsTarget - CINE.ts) * (1 - Math.pow(.001, dt));
+  if (CINE.slowT > 0) { CINE.slowT -= dt; if (CINE.slowT <= 0 && !CINE.dying) CINE.tsTarget = 1; }
+  syncMoto(t);
+
+  if (CINE.dying) {
+    deathCam(dt);
+  } else {
+    modeTarget(dt, t);
+    lookBackUpdate(dt);
+    applyLookBack();
+
+    if (CINE.trans) {
+      CINE.transT += dt;
+      const k = Math.min(1, CINE.transT / CINE.transDur);
+      const e = k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+      CINE.pos.copy(CINE.fromPos).lerp(_tgt.pos, e);
+      CINE.pos.y += Math.sin(e * Math.PI) * 4;            // crane lift mid-blend
+      CINE.look.copy(CINE.fromLook).lerp(_tgt.look, e);
+      CINE.fov = THREE.MathUtils.lerp(CINE.fovFrom, _tgt.fov, e);
+      if (k >= 1) CINE.trans = false;
+    } else {
+      CINE.pos.lerp(_tgt.pos, 1 - Math.pow(.003, dt));
+      CINE.look.lerp(_tgt.look, 1 - Math.pow(.0004, dt));
+      CINE.fov += (_tgt.fov - CINE.fov) * (1 - Math.pow(.01, dt));
+    }
+
+    /* gear-shift punches */
+    const GEAR = [0, 40, 80, 115, 138];
+    let g = 0; for (let i = GEAR.length - 1; i >= 0; i--) if (speed >= GEAR[i]) { g = i; break; }
+    if (gameActive && g > CINE.lastGear) { CINE.fovPunch += 2.5; camShake(.07); }
+    CINE.lastGear = g;
+    CINE.fovPunch *= Math.pow(.01, dt);
+
+    /* nitro FOV kick — fast attack, slow release */
+    const nitro = keys.Space && speed > 35 && gameActive;
+    CINE.fovKick += ((nitro ? 8 : 0) - CINE.fovKick) * (1 - Math.pow(nitro ? .0001 : .05, dt));
+
+    /* near-miss micro slow-mo + whip */
+    CINE.nearMissT -= dt;
+    if (gameActive && CINE.nearMissT <= 0 && speed > 55) {
+      const px = player.group.position.x, pz = player.z;
+      for (const c of traffic) {
+        const dz = Math.abs(c.group.position.z - pz);
+        const dx = Math.abs(c.group.position.x - px);
+        if (dz < 9 && dx > 2.3 && dx < 4.6) {
+          CINE.nearMissT = 2.2;
+          CINE.tsTarget = .55; CINE.slowT = .32;
+          CINE.whip += (c.group.position.x > px ? -1 : 1) * .045;
+          camShake(.3); CINE.fovPunch += 3;
+          break;
+        }
+      }
+    }
+
+    /* rumble strip jitter at the road edge */
+    if (gameActive && Math.abs(player.group.position.x) > CONFIG.roadWidth / 2 - 2.2 && speed > 25)
+      camShake(dt * 3);
+  }
+
+  /* procedural shake */
+  const s = CINE.shake * CINE.shake;
+  const sx = n1(t * 19 + CINE.seed) * s * .55;
+  const sy = n1(t * 23 + CINE.seed + 40) * s * .4;
+  const sz = n1(t * 17 + CINE.seed + 80) * s * .55;
+  const sr = n1(t * 29 + CINE.seed + 7) * s * .02;
+  CINE.shake = Math.max(0, CINE.shake - dt * 1.6);
+
+  /* steering bank + whip */
+  const steerRoll = THREE.MathUtils.clamp(player.vx * .012, -.12, .12);
+  CINE.whip *= Math.pow(.015, dt);
+  CINE.roll += ((steerRoll + CINE.whip) - CINE.roll) * (1 - Math.pow(.01, dt));
+
+  camera.position.set(CINE.pos.x + sx, CINE.pos.y + sy, CINE.pos.z + sz);
+  if (cameraMode === 1 && speed > 15 && !CINE.dying) {
+    const bob = speed / 140 * .05;
+    camera.position.y += Math.sin(t * 9) * bob;
+    camera.position.x += Math.sin(t * 7.3 + 1) * bob * .6;
+  }
+  camera.lookAt(CINE.look);
+  camera.rotateZ(CINE.roll + sr);
+  camera.fov = CINE.fov + CINE.fovKick + CINE.fovPunch + s * 2;
+  camera.updateProjectionMatrix();
+
+  /* letterbox */
+  const barsWant = prefs.bars && (cameraMode === 3 || CINE.lb > .25 || CINE.dying) ? 1 : 0;
+  CINE.barV += (barsWant - CINE.barV) * (1 - Math.pow(.01, dt));
+  const bh = Math.round(innerHeight * .07 * CINE.barV);
+  barTop.style.height = bh + "px";
+  barBot.style.height = bh + "px";
+  rec.style.opacity = (CINE.barV > .5 && (cameraMode === 3 || CINE.dying)) ? "1" : "0";
+  document.body.classList.toggle("cine-letterboxed", CINE.barV > .5);
+
+  followLights();
+};
+
+/* ---------- 9. MODE SWITCHING ---------- */
+function beginTransition() {
+  CINE.fromPos.copy(camera.position);
+  CINE.fromLook.copy(CINE.look);
+  CINE.fovFrom = CINE.fov;
+  CINE.trans = true; CINE.transT = 0;
+}
+function finishSwitch() {
+  if (motorcycleGroup) motorcycleGroup.visible = cameraMode === 1;
+  const el = byId("camera-mode"); if (el) el.textContent = CAMERA_MODES[cameraMode];
+  if (typeof showCameraHint === "function") showCameraHint();
+  if (typeof showAchievement === "function") showAchievement("🎥 " + CAMERA_MODES[cameraMode]);
+  whoosh();
+}
+switchCameraMode = function () {
+  if (CINE.dying) return;
+  beginTransition();
+  cameraMode = (cameraMode + 1) % MODE_NAMES.length;
+  finishSwitch();
+};
+resetCameraTarget = function () {
+  CINE.trans = false; CINE.dying = false;
+  CINE.ts = 1; CINE.tsTarget = 1; CINE.slowT = 0;
+  CINE.shake = 0; CINE.fovKick = 0; CINE.fovPunch = 0;
+  CINE.lb = 0; CINE.glanceT = 0; CINE.lastGear = 0;
+  modeTarget(.016, performance.now() * .001);
+  camera.position.copy(_tgt.pos); CINE.pos.copy(_tgt.pos);
+  CINE.look.copy(_tgt.look); camera.lookAt(_tgt.look);
+  camera.fov = _tgt.fov; CINE.fov = _tgt.fov; camera.updateProjectionMatrix();
+  if (motorcycleGroup) motorcycleGroup.visible = cameraMode === 1;
+  cameraTarget.x = _tgt.pos.x; cameraTarget.y = _tgt.pos.y; cameraTarget.z = _tgt.pos.z;
+  restoreColor();
+};
+
+/* ---------- 10. HOTKEYS ---------- */
+window.addEventListener("keydown", (e) => {
+  if (e.code === "KeyV" && !e.repeat && !CINE.dying) {
+    beginTransition();
+    cameraMode = cameraMode === 3 ? 0 : 3;
+    finishSwitch();
+  }
+  if (e.code === "KeyB") CINE.lbHold = true;
+});
+window.addEventListener("keyup", (e) => { if (e.code === "KeyB") CINE.lbHold = false; });
+
+/* ---------- 11. EVENT HOOKS (chain-safe wraps) ---------- */
+const _hitPlayer = hitPlayer;
+hitPlayer = function () {
+  const before = lives;
+  _hitPlayer();
+  if (lives < before && !CINE.dying) {
+    camShake(1.05);
+    CINE.tsTarget = .45; CINE.slowT = .18;   // damage hit-stop
+  }
+};
+
+const _endGame = endGame;
+endGame = function () {
+  if (CINE.dying) return;                    // never double-die mid-cinematic
+  if (!prefs.deathcam || !prefs.fx) { _endGame(); return; }
+  CINE.dying = true; CINE.deadT = 0;
+  CINE.trans = false;
+  CINE.tsTarget = .05;
+  CINE.deadA = Math.atan2(camera.position.x - player.group.position.x, camera.position.z - player.z);
+  CINE.lbHold = false; CINE.glanceT = 0;
+  camShake(1.3);
+};
+
+const _activateTruck = activateTruck;
+activateTruck = function () {
+  _activateTruck();
+  if (prefs.autoLook && !CINE.dying && truck.active) CINE.glanceT = 1.8;  // dramatic first glance
+};
+
+/* timescale feeds the sim; the camera itself always runs real-time */
+const _uPlayer = updatePlayer;  updatePlayer  = (d) => _uPlayer(d * CINE.ts);
+const _uTraffic = updateTraffic; updateTraffic = (d) => _uTraffic(d * CINE.ts);
+const _uTruck = updateTruck;    updateTruck   = (d) => _uTruck(d * CINE.ts);
+
+/* ---------- 12. SWITCH WHOOSH ---------- */
+let AC = null;
+function whoosh() {
+  try {
+    const A = window.AudioContext || window.webkitAudioContext; if (!A) return;
+    if (!AC) AC = new A();
+    if (AC.state === "suspended") AC.resume().catch(() => {});
+    const t = AC.currentTime;
+    const o = AC.createOscillator(), f = AC.createBiquadFilter(), g = AC.createGain();
+    o.type = "sawtooth"; f.type = "bandpass"; f.Q.value = 1.2;
+    o.frequency.setValueAtTime(300, t);  o.frequency.exponentialRampToValueAtTime(1400, t + .22);
+    f.frequency.setValueAtTime(500, t);  f.frequency.exponentialRampToValueAtTime(2200, t + .22);
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(.05, t + .05);
+    g.gain.exponentialRampToValueAtTime(.0001, t + .3);
+    o.connect(f); f.connect(g); g.connect(AC.destination);
+    o.start(t); o.stop(t + .32);
+  } catch (e) {}
+}
+
+/* ---------- 13. QoL PANEL TOGGLES ---------- */
+function addCineButtons(attempt = 0) {
+  if (attempt > 30) return;
+  const host = document.querySelector("#mtr-qol .mtr-qol-btns");
+  if (!host) { setTimeout(() => addCineButtons(attempt + 1), 400); return; }
+  if (byId("cine-fx-btn")) return;
+  const mk = (id, label, key) => {
+    const b = document.createElement("button");
+    b.id = id; b.type = "button"; b.className = "mtr-mini";
+    const paint = () => { b.textContent = label + (prefs[key] ? "✓" : "✗"); b.style.opacity = prefs[key] ? "1" : ".55"; };
+    b.onclick = () => {
+      prefs[key] = !prefs[key]; savePrefs(); paint();
+      if (typeof showAchievement === "function") showAchievement(label.trim() + (prefs[key] ? " ON" : " OFF"));
+    };
+    paint(); host.appendChild(b);
+  };
+  mk("cine-fx-btn", "🎥 FX ", "fx");
+  mk("cine-bars-btn", "🎞️ BARS ", "bars");
+  mk("cine-look-btn", "👀 GLANCE ", "autoLook");
+  mk("cine-death-btn", "💀 DEATHCAM ", "deathcam");
+}
+setTimeout(() => addCineButtons(0), 500);
+
+/* ---------- 14. MENU-RETURN SAFETY NET ---------- */
+setInterval(() => {
+  if (!gameActive) {
+    if (CINE.barV > .001) {
+      CINE.barV *= .8;
+      const h = Math.round(innerHeight * .07 * CINE.barV);
+      barTop.style.height = h + "px"; barBot.style.height = h + "px";
+      rec.style.opacity = "0";
+      document.body.classList.toggle("cine-letterboxed", CINE.barV > .5);
+    }
+    CINE.trans = false;
+    if (CINE.dying) { CINE.dying = false; CINE.tsTarget = 1; CINE.ts = 1; restoreColor(); }
+  }
+}, 100);
+})();
 init()
 
   </script>
